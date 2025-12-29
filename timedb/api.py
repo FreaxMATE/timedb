@@ -127,15 +127,15 @@ async def root():
 async def read_values(
     start_valid: Optional[datetime] = Query(None, description="Start of valid time range (ISO format)"),
     end_valid: Optional[datetime] = Query(None, description="End of valid time range (ISO format)"),
-    start_run: Optional[datetime] = Query(None, description="Start of run time range (ISO format)"),
-    end_run: Optional[datetime] = Query(None, description="End of run time range (ISO format)"),
+    start_known: Optional[datetime] = Query(None, description="Start of known_time range (ISO format)"),
+    end_known: Optional[datetime] = Query(None, description="End of known_time range (ISO format)"),
     mode: str = Query("flat", description="Query mode: 'flat' or 'overlapping'"),
     all_versions: bool = Query(False, description="Include all versions (not just current)"),
 ):
     """
     Read time series values from the database.
     
-    Returns values filtered by valid_time and/or run_time ranges.
+    Returns values filtered by valid_time and/or known_time ranges.
     All datetime parameters should be in ISO format (e.g., 2025-01-01T00:00:00Z).
     
     Modes:
@@ -156,17 +156,17 @@ async def read_values(
             start_valid = start_valid.replace(tzinfo=timezone.utc)
         if end_valid and end_valid.tzinfo is None:
             end_valid = end_valid.replace(tzinfo=timezone.utc)
-        if start_run and start_run.tzinfo is None:
-            start_run = start_run.replace(tzinfo=timezone.utc)
-        if end_run and end_run.tzinfo is None:
-            end_run = end_run.replace(tzinfo=timezone.utc)
+        if start_known and start_known.tzinfo is None:
+            start_known = start_known.replace(tzinfo=timezone.utc)
+        if end_known and end_known.tzinfo is None:
+            end_known = end_known.replace(tzinfo=timezone.utc)
         
         df = db.read.read_values_between(
             dsn,
             start_valid=start_valid,
             end_valid=end_valid,
-            start_run=start_run,
-            end_run=end_run,
+            start_known=start_known,
+            end_known=end_known,
             mode=mode,
             all_versions=all_versions,
         )

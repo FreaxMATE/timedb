@@ -17,8 +17,8 @@ def read_values_between(
     *,
     start_valid: Optional[datetime] = None,
     end_valid: Optional[datetime] = None,
-    start_run: Optional[datetime] = None,
-    end_run: Optional[datetime] = None,
+    start_known: Optional[datetime] = None,
+    end_known: Optional[datetime] = None,
     mode: Literal["flat", "overlapping"] = "flat",
     all_versions: bool = False,
 ) -> pd.DataFrame:
@@ -29,8 +29,8 @@ def read_values_between(
         conninfo: Database connection string
         start_valid: Start of valid time range (optional)
         end_valid: End of valid time range (optional)
-        start_run: Start of run time range (optional)
-        end_run: End of run time range (optional)
+        start_known: Start of known_time range (optional)
+        end_known: End of known_time range (optional)
         mode: Query mode - "flat" or "overlapping" (default: "flat")
             - "flat": Returns (valid_time, value_key, value) with latest known_time per valid_time
             - "overlapping": Returns (known_time, valid_time, value_key, value) - all rows
@@ -48,10 +48,10 @@ def read_values_between(
         filters.append("v.valid_time >= %(start_valid)s")
     if end_valid is not None:
         filters.append("v.valid_time < %(end_valid)s")
-    if start_run is not None:
-        filters.append("r.run_start_time >= %(start_run)s")
-    if end_run is not None:
-        filters.append("r.run_start_time < %(end_run)s")
+    if start_known is not None:
+        filters.append("r.known_time >= %(start_known)s")
+    if end_known is not None:
+        filters.append("r.known_time < %(end_known)s")
     
     # is_current filter (only if all_versions is False)
     if not all_versions:
@@ -80,8 +80,8 @@ def read_values_between(
         params = {
             "start_valid": start_valid,
             "end_valid": end_valid,
-            "start_run": start_run,
-            "end_run": end_run,
+            "start_known": start_known,
+            "end_known": end_known,
         }
         df = pd.read_sql_query(sql, engine, params=params)
         
@@ -109,8 +109,8 @@ def read_values_between(
         params = {
             "start_valid": start_valid,
             "end_valid": end_valid,
-            "start_run": start_run,
-            "end_run": end_run,
+            "start_known": start_known,
+            "end_known": end_known,
         }
         df = pd.read_sql_query(sql, engine, params=params)
         
@@ -130,27 +130,27 @@ def read_values_between(
 if __name__ == "__main__":
     conninfo = os.environ["NEON_PG_URL"]
 
-    # Example 1: filter only on valid_time (same as your current behavior)
-    df1 = read_values(
+    # Example 1: filter only on valid_time
+    df1 = read_values_between(
         conninfo,
         start_valid=datetime(2025, 12, 25, 0, 0, tzinfo=timezone.utc),
         end_valid=datetime(2025, 12, 28, 0, 0, tzinfo=timezone.utc),
     )
 
-    # Example 2: filter only on run_time
-    df2 = read_values(
+    # Example 2: filter only on known_time
+    df2 = read_values_between(
         conninfo,
-        start_run=datetime(2025, 12, 26, 0, 0, tzinfo=timezone.utc),
-        end_run=datetime(2025, 12, 27, 0, 0, tzinfo=timezone.utc),
+        start_known=datetime(2025, 12, 26, 0, 0, tzinfo=timezone.utc),
+        end_known=datetime(2025, 12, 27, 0, 0, tzinfo=timezone.utc),
     )
 
-    # Example 3: filter on both
-    df3 = read_values(
+    # Example 3: filter on both valid_time and known_time
+    df3 = read_values_between(
         conninfo,
         start_valid=datetime(2025, 12, 25, 0, 0, tzinfo=timezone.utc),
         end_valid=datetime(2025, 12, 28, 0, 0, tzinfo=timezone.utc),
-        start_run=datetime(2025, 12, 26, 0, 0, tzinfo=timezone.utc),
-        end_run=datetime(2025, 12, 27, 0, 0, tzinfo=timezone.utc),
+        start_known=datetime(2025, 12, 26, 0, 0, tzinfo=timezone.utc),
+        end_known=datetime(2025, 12, 27, 0, 0, tzinfo=timezone.utc),
     )
 
     print(df1.head())

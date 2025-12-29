@@ -1,0 +1,108 @@
+# timedb/cli.py
+import os
+import sys
+import click
+from importlib import import_module
+from dotenv import load_dotenv, find_dotenv
+load_dotenv(find_dotenv())
+
+load_dotenv() 
+
+def dsn_option(fn):
+    return click.option(
+        "--dsn", "-d",
+        envvar=["TIMEDB_DSN", "DATABASE_URL"],
+        help="Postgres DSN",
+    )(fn)
+
+@click.group()
+def cli():
+    """timedb CLI"""
+
+@cli.group()
+def create():
+    """Create resources (e.g. tables)"""
+    pass
+
+@create.command("tables")
+@dsn_option
+@click.option("--schema", "-s", default=None, help="Schema name to use for the tables (sets search_path for the DDL).")
+@click.option("--with-metadata/--no-metadata", default=False, help="Also create the optional metadata_table addon.")
+@click.option("--yes", "-y", is_flag=True, help="Do not prompt for confirmation")
+@click.option("--dry-run", is_flag=True, help="Print the DDL (from pg_create_table.DDL) and exit")
+def create_tables(dsn, schema, with_metadata, yes, dry_run):
+    """
+    Create timedb tables using pg_create_table.create_schema().
+    Example: timedb create tables --dsn postgresql://... --schema timedb --with-metadata
+    """
+    conninfo = dsn
+    if not conninfo:
+        click.echo("ERROR: no DSN provided. Use --dsn or set TIMEDB_DSN / DATABASE_URL", err=True)
+        sys.exit(2)
+
+    # Import the implementation module(s) from repository
+    try:
+        from . import pg_create_table
+    except Exception as e:
+        click.echo(f"ERROR: cannot import pg_create_table: {e}", err=True)
+        sys.exit(1)
+
+    # Dry-run -> print the DDL string defined in module (pg_create_table.DDL)
+    if dry_run:
+        ddl = getattr(pg_create_table, "DDL", None)
+        if ddl is None:
+            click.echo("No DDL found in pg_create_table module.", err=True)
+            sys.exit(1)
+        click.echo(ddl)
+        return
+
+    if not yes:
+        click.echo("About to create/update timedb schema/tables using pg_create_table.create_schema().")
+        click.echo(f"Connection: {conninfo}")
+        if schema:
+            click.echo(f"Schema/search_path: {schema}")
+        if with_metadata:
+            click.echo("Will also create the optional metadata_table addon.")
+        if not click.confirm("Continue?"):
+            click.echo("Aborted.")
+            return
+
+    # If schema specified, set PGOPTIONS to ensure the DDL runs with that search_path.
+    old_pgoptions = os.environ.get("PGOPTIONS")
+    if schema:
+        # Set search_path for server session using libpq/pgoptions mechanism
+        # This ensures create_schema's psycopg.connect() inherits the search_path.
+        os.environ["PGOPTIONS"] = f"-c search_path={schema}"
+    try:
+        # call the create_schema function from pg_create_table
+        create_schema = getattr(pg_create_table, "create_schema", None)
+        if create_schema is None:
+            raise RuntimeError("pg_create_table.create_schema not found")
+        create_schema(conninfo)
+        click.echo("Base timedb tables created/updated successfully.")
+
+        if with_metadata:
+            try:
+                from . import pg_create_table_with_metadata
+                create_schema_metadata = getattr(pg_create_table_with_metadata, "create_schema_metadata", None)
+                if create_schema_metadata is None:
+                    raise RuntimeError("pg_create_table_with_metadata.create_schema_metadata not found")
+                create_schema_metadata(conninfo)
+                click.echo("Optional metadata schema created/updated successfully.")
+            except Exception as e:
+                click.echo(f"ERROR creating metadata schema: {e}", err=True)
+                sys.exit(1)
+
+    except Exception as exc:
+        click.echo(f"ERROR creating tables: {exc}", err=True)
+        sys.exit(1)
+    finally:
+        # restore PGOPTIONS
+        if schema:
+            if old_pgoptions is None:
+                os.environ.pop("PGOPTIONS", None)
+            else:
+                os.environ["PGOPTIONS"] = old_pgoptions
+
+if __name__ == "__main__":
+    cli()

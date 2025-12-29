@@ -1,12 +1,12 @@
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
 
-[tool.hatch.build.targets.wheel]
-include = ["timedb/*.sql"]
+[tool.setuptools]
+packages = ["timedb"]
 
-[tool.hatch.build.targets.sdist]
-include = ["timedb/*.sql"]
+[tool.setuptools.package-data]
+timedb = ["*.sql"]
 
 [project]
 name = "timedb"

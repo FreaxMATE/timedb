@@ -110,16 +110,27 @@ def insert_values(
         return
 
     with conn.cursor() as cur:
+        # Insert with conflict check matching the unique index
+        # The unique index is on (run_id, valid_time, COALESCE(valid_time_end, valid_time), value_key) WHERE is_current
+        # We use WHERE NOT EXISTS to prevent duplicates, matching the index logic 
+        # It mirrors the index's uniqueness rule to avoid constraint violations.
         cur.executemany(
             """
             INSERT INTO values_table (
                 run_id, valid_time, valid_time_end, value_key, value,
                 change_time, is_current
             )
-            VALUES (%s, %s, %s, %s, %s, now(), true)
-            ON CONFLICT DO NOTHING;
+            SELECT %s, %s, %s, %s, %s, now(), true
+            WHERE NOT EXISTS (
+                SELECT 1 FROM values_table
+                WHERE run_id = %s
+                  AND valid_time = %s
+                  AND COALESCE(valid_time_end, valid_time) = COALESCE(%s, %s)
+                  AND value_key = %s
+                  AND is_current = true
+            );
             """,
-            rows_list,
+            [(r[0], r[1], r[2], r[3], r[4], r[0], r[1], r[2], r[1], r[3]) for r in rows_list],
         )
 
 

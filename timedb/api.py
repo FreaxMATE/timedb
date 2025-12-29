@@ -129,15 +129,27 @@ async def read_values(
     end_valid: Optional[datetime] = Query(None, description="End of valid time range (ISO format)"),
     start_run: Optional[datetime] = Query(None, description="Start of run time range (ISO format)"),
     end_run: Optional[datetime] = Query(None, description="End of run time range (ISO format)"),
+    mode: str = Query("flat", description="Query mode: 'flat' or 'overlapping'"),
+    all_versions: bool = Query(False, description="Include all versions (not just current)"),
 ):
     """
     Read time series values from the database.
     
     Returns values filtered by valid_time and/or run_time ranges.
     All datetime parameters should be in ISO format (e.g., 2025-01-01T00:00:00Z).
+    
+    Modes:
+    - "flat": Returns (valid_time, value_key, value) with latest known_time per valid_time
+    - "overlapping": Returns (known_time, valid_time, value_key, value) - all rows with known_time
+    
+    all_versions: If True, includes all versions (both is_current=true and false). If False, only current values.
     """
     try:
         dsn = get_dsn()
+        
+        # Validate mode parameter
+        if mode not in ["flat", "overlapping"]:
+            raise HTTPException(status_code=400, detail=f"Invalid mode: {mode}. Must be 'flat' or 'overlapping'")
         
         # Convert timezone-naive datetimes to UTC if needed
         if start_valid and start_valid.tzinfo is None:
@@ -155,6 +167,8 @@ async def read_values(
             end_valid=end_valid,
             start_run=start_run,
             end_run=end_run,
+            mode=mode,
+            all_versions=all_versions,
         )
         
         # Convert DataFrame to JSON-serializable format

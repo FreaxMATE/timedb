@@ -3,13 +3,14 @@ from dotenv import load_dotenv
 import pandas as pd
 from sqlalchemy import create_engine
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, Literal
 from importlib import resources
 
 load_dotenv()
 
-# Read packaged SQL
+# Read packaged SQL (legacy query, kept for backward compatibility)
 SQL_QUERY = resources.files("timedb").joinpath("sql", "pg_read_table.sql").read_text(encoding="utf-8")
+
 
 def read_values_between(
     conninfo: str,
@@ -18,24 +19,111 @@ def read_values_between(
     end_valid: Optional[datetime] = None,
     start_run: Optional[datetime] = None,
     end_run: Optional[datetime] = None,
+    mode: Literal["flat", "overlapping"] = "flat",
+    all_versions: bool = False,
 ) -> pd.DataFrame:
-    sql = SQL_QUERY
-
-    params = {
-        "start_valid": start_valid,
-        "end_valid": end_valid,
-        "start_run": start_run,
-        "end_run": end_run,
-    }
-
-    engine = create_engine(conninfo)
-    df = pd.read_sql_query(sql, engine, params=params)
-
-    # Ensure timezone-aware pandas datetimes
-    df["run_time"] = pd.to_datetime(df["run_time"], utc=True)
-    df["valid_time"] = pd.to_datetime(df["valid_time"], utc=True)
-
-    df = df.set_index(["run_time", "valid_time"]).sort_index()
+    """
+    Read time series values from the database.
+    
+    Args:
+        conninfo: Database connection string
+        start_valid: Start of valid time range (optional)
+        end_valid: End of valid time range (optional)
+        start_run: Start of run time range (optional)
+        end_run: End of run time range (optional)
+        mode: Query mode - "flat" or "overlapping" (default: "flat")
+            - "flat": Returns (valid_time, value_key, value) with latest known_time per valid_time
+            - "overlapping": Returns (known_time, valid_time, value_key, value) - all rows
+        all_versions: If True, include all versions (not just current). If False, only is_current=True (default: False)
+    
+    Returns:
+        DataFrame with columns and index based on mode
+    """
+    
+    # Build WHERE clause filters
+    filters = []
+    
+    # Time range filters
+    if start_valid is not None:
+        filters.append("v.valid_time >= %(start_valid)s")
+    if end_valid is not None:
+        filters.append("v.valid_time < %(end_valid)s")
+    if start_run is not None:
+        filters.append("r.run_start_time >= %(start_run)s")
+    if end_run is not None:
+        filters.append("r.run_start_time < %(end_run)s")
+    
+    # is_current filter (only if all_versions is False)
+    if not all_versions:
+        filters.append("v.is_current = true")
+    
+    where_clause = ""
+    if filters:
+        where_clause = "WHERE " + " AND ".join(filters)
+    
+    if mode == "flat":
+        # Flat mode: (valid_time, value_key, value) with latest known_time per valid_time
+        # Include valid_time_end in DISTINCT ON to handle interval values correctly
+        # Use latest known_time to select which row when multiple exist for same (valid_time, value_key)
+        sql = f"""
+        SELECT DISTINCT ON (v.valid_time, COALESCE(v.valid_time_end, v.valid_time), v.value_key)
+            v.valid_time,
+            v.value_key,
+            v.value
+        FROM values_table v
+        JOIN runs_table r ON v.run_id = r.run_id
+        {where_clause}
+        ORDER BY v.valid_time, COALESCE(v.valid_time_end, v.valid_time), v.value_key, r.known_time DESC;
+        """
+        
+        engine = create_engine(conninfo)
+        params = {
+            "start_valid": start_valid,
+            "end_valid": end_valid,
+            "start_run": start_run,
+            "end_run": end_run,
+        }
+        df = pd.read_sql_query(sql, engine, params=params)
+        
+        # Ensure timezone-aware pandas datetimes
+        df["valid_time"] = pd.to_datetime(df["valid_time"], utc=True)
+        
+        # Set index on (valid_time, value_key)
+        df = df.set_index(["valid_time", "value_key"]).sort_index()
+        
+    elif mode == "overlapping":
+        # Overlapping mode: (known_time, valid_time, value_key, value)
+        sql = f"""
+        SELECT
+            r.known_time,
+            v.valid_time,
+            v.value_key,
+            v.value
+        FROM values_table v
+        JOIN runs_table r ON v.run_id = r.run_id
+        {where_clause}
+        ORDER BY r.known_time, v.valid_time, v.value_key;
+        """
+        
+        engine = create_engine(conninfo)
+        params = {
+            "start_valid": start_valid,
+            "end_valid": end_valid,
+            "start_run": start_run,
+            "end_run": end_run,
+        }
+        df = pd.read_sql_query(sql, engine, params=params)
+        
+        # Ensure timezone-aware pandas datetimes
+        df["known_time"] = pd.to_datetime(df["known_time"], utc=True)
+        df["valid_time"] = pd.to_datetime(df["valid_time"], utc=True)
+        
+        # Set index on (known_time, valid_time, value_key)
+        df = df.set_index(["known_time", "valid_time", "value_key"]).sort_index()
+        
+    else:
+        raise ValueError(f"Invalid mode: {mode}. Must be 'flat' or 'overlapping'")
+    
     return df
 
 

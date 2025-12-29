@@ -24,6 +24,11 @@ def create():
     """Create resources (e.g. tables)"""
     pass
 
+@cli.group()
+def delete():
+    """Delete resources (e.g. tables)"""
+    pass
+
 @create.command("tables")
 @dsn_option
 @click.option("--schema", "-s", default=None, help="Schema name to use for the tables (sets search_path for the DDL).")
@@ -95,6 +100,62 @@ def create_tables(dsn, schema, with_metadata, yes, dry_run):
 
     except Exception as exc:
         click.echo(f"ERROR creating tables: {exc}", err=True)
+        sys.exit(1)
+    finally:
+        # restore PGOPTIONS
+        if schema:
+            if old_pgoptions is None:
+                os.environ.pop("PGOPTIONS", None)
+            else:
+                os.environ["PGOPTIONS"] = old_pgoptions
+
+@delete.command("tables")
+@dsn_option
+@click.option("--schema", "-s", default=None, help="Schema name to use for the tables (sets search_path for the DDL).")
+@click.option("--yes", "-y", is_flag=True, help="Do not prompt for confirmation")
+def delete_tables(dsn, schema, yes):
+    """
+    Delete all timedb tables (including metadata tables).
+    Example: timedb delete tables --dsn postgresql://... --schema timedb
+    """
+    conninfo = dsn
+    if not conninfo:
+        click.echo("ERROR: no DSN provided. Use --dsn or set TIMEDB_DSN / DATABASE_URL", err=True)
+        sys.exit(2)
+
+    if not yes:
+        click.echo("WARNING: This will delete ALL timedb tables and their data!")
+        click.echo("This includes: runs_table, values_table, metadata_table, and all views.")
+        click.echo(f"Connection: {conninfo}")
+        if schema:
+            click.echo(f"Schema/search_path: {schema}")
+        if not click.confirm("Are you sure you want to continue? This action cannot be undone."):
+            click.echo("Aborted.")
+            return
+
+    # Import the implementation module from repository
+    try:
+        from . import pg_delete_table
+    except Exception as e:
+        click.echo(f"ERROR: cannot import pg_delete_table: {e}", err=True)
+        sys.exit(1)
+
+    # If schema specified, set PGOPTIONS to ensure the DDL runs with that search_path.
+    old_pgoptions = os.environ.get("PGOPTIONS")
+    if schema:
+        # Set search_path for server session using libpq/pgoptions mechanism
+        # This ensures delete_schema's psycopg.connect() inherits the search_path.
+        os.environ["PGOPTIONS"] = f"-c search_path={schema}"
+    try:
+        # call the delete_schema function from pg_delete_table
+        delete_schema = getattr(pg_delete_table, "delete_schema", None)
+        if delete_schema is None:
+            raise RuntimeError("pg_delete_table.delete_schema not found")
+        delete_schema(conninfo)
+        click.echo("All timedb tables (including metadata) deleted successfully.")
+            
+    except Exception as exc:
+        click.echo(f"ERROR deleting tables: {exc}", err=True)
         sys.exit(1)
     finally:
         # restore PGOPTIONS

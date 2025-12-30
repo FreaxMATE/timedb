@@ -1,7 +1,7 @@
 import os
 from dotenv import load_dotenv
 import pandas as pd
-from sqlalchemy import create_engine
+import psycopg
 from datetime import datetime, timezone
 from typing import Optional, Literal
 from importlib import resources
@@ -83,7 +83,6 @@ def read_values_between(
         ORDER BY v.valid_time, COALESCE(v.valid_time_end, v.valid_time), v.value_key, r.known_time DESC;
         """
         
-        engine = create_engine(conninfo)
         params = {
             "tenant_id": tenant_id,
             "start_valid": start_valid,
@@ -91,7 +90,8 @@ def read_values_between(
             "start_known": start_known,
             "end_known": end_known,
         }
-        df = pd.read_sql_query(sql, engine, params=params)
+        with psycopg.connect(conninfo) as conn:
+            df = pd.read_sql(sql, conn, params=params)
         
         # Ensure timezone-aware pandas datetimes
         df["valid_time"] = pd.to_datetime(df["valid_time"], utc=True)
@@ -113,7 +113,6 @@ def read_values_between(
         ORDER BY r.known_time, v.valid_time, v.value_key;
         """
         
-        engine = create_engine(conninfo)
         params = {
             "tenant_id": tenant_id,
             "start_valid": start_valid,
@@ -121,7 +120,8 @@ def read_values_between(
             "start_known": start_known,
             "end_known": end_known,
         }
-        df = pd.read_sql_query(sql, engine, params=params)
+        with psycopg.connect(conninfo) as conn:
+            df = pd.read_sql(sql, conn, params=params)
         
         # Ensure timezone-aware pandas datetimes
         df["known_time"] = pd.to_datetime(df["known_time"], utc=True)

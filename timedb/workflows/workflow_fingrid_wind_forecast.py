@@ -73,9 +73,9 @@ def main():
     tenant_id = uuid.uuid4()
     entity_id = uuid.uuid4()
     
-    # Prepare value_rows in the format: (tenant_id, entity_id, valid_time, value_key, value)
+    # Prepare value_rows in the format: (tenant_id, valid_time, entity_id, value_key, value)
     value_rows = [
-        (tenant_id, entity_id, row["valid_time"], row["value_key"], row["value"])
+        (tenant_id, row["valid_time"], entity_id, row["value_key"], row["value"])
         for _, row in df.iterrows()
     ]
 

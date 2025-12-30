@@ -25,6 +25,7 @@ dependencies = [
   "pydantic>=2.0.0",
   "pandas>=2.0.0",
   "sqlalchemy>=2.0.0",
+  "matplotlib>=3.7.5",
 ]
 
 # expose the CLI command 'timedb' which points to the Click group `cli` in timedb/cli.py

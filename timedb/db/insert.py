@@ -69,8 +69,8 @@ def insert_values(
     Bulk insert forecast values for a run.
 
     Accepts rows in either of two shapes:
-      - (tenant_id, entity_id, valid_time, value_key, value)                       # point-in-time
-      - (tenant_id, entity_id, valid_time, valid_time_end, value_key, value)       # interval
+      - (tenant_id, valid_time, entity_id, value_key, value)                       # point-in-time
+      - (tenant_id, valid_time, valid_time_end, entity_id, value_key, value)       # interval
 
     The function will prepend the provided run_id to each row
     and insert tuples of shape (run_id, tenant_id, entity_id, valid_time, valid_time_end, value_key, value).
@@ -84,15 +84,15 @@ def insert_values(
     for item in value_rows:
         # either 5-tuple (point-in-time) or 6-tuple (interval)
         if len(item) == 5:
-            tenant_id, entity_id, valid_time, value_key, value = item
+            tenant_id, valid_time, entity_id, value_key, value = item
             valid_time_end = None
         elif len(item) == 6:
-            tenant_id, entity_id, valid_time, valid_time_end, value_key, value = item
+            tenant_id, valid_time, valid_time_end, entity_id, value_key, value = item
         else:
             raise ValueError(
                 "Each value row must be either "
-                "(tenant_id, entity_id, valid_time, value_key, value) or "
-                "(tenant_id, entity_id, valid_time, valid_time_end, value_key, value)"
+                "(tenant_id, valid_time, entity_id, value_key, value) or "
+                "(tenant_id, valid_time, valid_time_end, entity_id, value_key, value)"
             )
 
         # Basic checks
@@ -141,7 +141,7 @@ def insert_values(
                   AND is_current = true
             );
             """,
-            [(r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[0], r[1], r[3], r[4], r[3], r[2], r[5]) for r in rows_list],
+            [(r[0], r[1], r[4], r[2], r[3], r[5], r[6], r[0], r[1], r[2], r[3], r[2], r[4], r[5]) for r in rows_list],
         )
 
 
@@ -153,16 +153,19 @@ def insert_run_with_values(
     workflow_id: str,
     run_start_time: datetime,
     run_finish_time: Optional[datetime],
-    value_rows: Iterable[Tuple],  # accepts (tenant_id, entity_id, valid_time, value_key, value) or (tenant_id, entity_id, valid_time, valid_time_end, value_key, value)
+    value_rows: Iterable[Tuple],  # accepts (tenant_id, valid_time, entity_id, value_key, value) or (tenant_id, valid_time, valid_time_end, entity_id, value_key, value)
     known_time: Optional[datetime] = None,
     run_params: Optional[Dict] = None,
 ) -> None:
     """
     One-shot helper: inserts the run + all values atomically.
 
+    This function ensures atomicity: either all operations succeed and are committed,
+    or all operations are rolled back if any error occurs. No partial writes are possible.
+
     value_rows is expected to be an iterable where each item is either:
-      - (tenant_id, entity_id, valid_time, value_key, value),                      # point-in-time
-      - (tenant_id, entity_id, valid_time, valid_time_end, value_key, value),      # interval
+      - (tenant_id, valid_time, entity_id, value_key, value),                      # point-in-time
+      - (tenant_id, valid_time, valid_time_end, entity_id, value_key, value),      # interval
 
     Note: The run's tenant_id parameter is used for the runs_table entry, but each value row
     can specify its own tenant_id. For single-tenant installations, all rows will typically
@@ -173,9 +176,16 @@ def insert_run_with_values(
         known_time: Time of knowledge - when the data was known/available.
                    If not provided, defaults to inserted_at (now()) in the database.
                    Useful for backfill operations where data is inserted later.
+    
+    Raises:
+        Exception: Any exception raised during insertion will cause a complete rollback
+                  of the transaction, ensuring no partial writes.
     """
 
     with psycopg.connect(conninfo) as conn:
+        # Use transaction context manager to ensure atomicity
+        # If any exception occurs, the transaction will automatically rollback
+        # This ensures either all operations succeed or none do (no partial writes)
         with conn.transaction():
             insert_run(
                 conn,

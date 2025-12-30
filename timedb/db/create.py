@@ -30,13 +30,14 @@ def create_schema(conninfo: str) -> None:
     - Should typically be run at service startup or via a migration step
     """
 
+    print("Creating database schema...")
     with psycopg.connect(conninfo, autocommit=False) as conn:
         with conn.cursor() as cur:
             cur.execute(DDL)
+    
+    print("✓ Schema created successfully")
 
 
 if __name__ == "__main__":
-    conninfo = os.environ["NEON_PG_URL2"]
-
+    conninfo = os.environ["DATABASE_URL"]
     create_schema(conninfo)
-    print("Database schema created or updated successfully.")

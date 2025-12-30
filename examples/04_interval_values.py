@@ -40,32 +40,32 @@ def main():
     
     value_rows = [
         # Point-in-time values (valid_time_end is None)
-        (tenant_id, entity_id, base_time, "instantaneous_power", 100.0),
-        (tenant_id, entity_id, base_time + timedelta(hours=1), "instantaneous_power", 105.0),
-        (tenant_id, entity_id, base_time + timedelta(hours=2), "instantaneous_power", 110.0),
+        (tenant_id, base_time, entity_id, "instantaneous_power", 100.0),
+        (tenant_id, base_time + timedelta(hours=1), entity_id, "instantaneous_power", 105.0),
+        (tenant_id, base_time + timedelta(hours=2), entity_id, "instantaneous_power", 110.0),
         
-        # Interval values (tenant_id, entity_id, valid_time, valid_time_end, value_key, value)
+        # Interval values (tenant_id, valid_time, valid_time_end, entity_id, value_key, value)
         (
             tenant_id,
-            entity_id,
             base_time,
             base_time + timedelta(hours=1),
+            entity_id,
             "energy_consumed",
             50.0  # Energy consumed over the hour
         ),
         (
             tenant_id,
-            entity_id,
             base_time + timedelta(hours=1),
             base_time + timedelta(hours=2),
+            entity_id,
             "energy_consumed",
             52.5
         ),
         (
             tenant_id,
-            entity_id,
             base_time + timedelta(hours=2),
             base_time + timedelta(hours=3),
+            entity_id,
             "energy_consumed",
             55.0
         ),

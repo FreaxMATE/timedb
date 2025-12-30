@@ -64,6 +64,59 @@ Shows how to work with time intervals:
 python examples/04_interval_values.py
 ```
 
+## Jupyter Notebooks
+
+Interactive notebooks demonstrating pandas DataFrame integration with TimeDB:
+
+### Notebook 1: Writing DataFrames (`notebook_01_write_dataframe.ipynb`)
+Learn how to convert pandas DataFrames to TimeDB format and insert them:
+- Converting simple time series DataFrames
+- Handling multiple value keys (mean, quantiles, etc.)
+- Working with interval values
+- Helper functions for common conversions
+
+**Open it:**
+```bash
+jupyter notebook examples/notebook_01_write_dataframe.ipynb
+# OR
+jupyter lab examples/notebook_01_write_dataframe.ipynb
+```
+
+### Notebook 2: Reading DataFrames (`notebook_02_read_dataframe.ipynb`)
+Learn how to read data from TimeDB into pandas DataFrames:
+- Reading in flat vs overlapping modes
+- Converting long-format to wide-format (pivot)
+- Filtering and querying data
+- Analyzing forecast revisions
+
+**Open it:**
+```bash
+jupyter notebook examples/notebook_02_read_dataframe.ipynb
+# OR
+jupyter lab examples/notebook_02_read_dataframe.ipynb
+```
+
+### Notebook 3: Complete Workflow (`notebook_03_complete_workflow.ipynb`)
+A complete end-to-end example combining all concepts:
+- Generate forecast data in a DataFrame
+- Write to TimeDB
+- Read back and analyze
+- Insert revised forecasts
+- Compare forecast revisions
+- Calculate accuracy metrics
+
+**Open it:**
+```bash
+jupyter notebook examples/notebook_03_complete_workflow.ipynb
+# OR
+jupyter lab examples/notebook_03_complete_workflow.ipynb
+```
+
+**Note:** The notebooks require `pandas`, `matplotlib`, and `jupyter` to be installed:
+```bash
+pip install pandas matplotlib jupyter
+```
+
 ## Running All Examples
 
 You can run all examples in sequence:

@@ -120,7 +120,7 @@ def insert_run_with_values_and_metadata(
     workflow_id: str,
     run_start_time: datetime,
     run_finish_time: Optional[datetime],
-    value_rows: Iterable[Tuple],  # accepts (tenant_id, entity_id, valid_time, value_key, value) or (tenant_id, entity_id, valid_time, valid_time_end, value_key, value)
+    value_rows: Iterable[Tuple],  # accepts (tenant_id, valid_time, entity_id, value_key, value) or (tenant_id, valid_time, valid_time_end, entity_id, value_key, value)
     known_time: Optional[datetime] = None,
     run_params: Optional[Dict] = None,
     metadata_rows: Optional[Iterable[Tuple[datetime, dict]]] = None,
@@ -128,7 +128,10 @@ def insert_run_with_values_and_metadata(
     """
     Atomically insert run, values and metadata.
 
-    - value_rows: iterable of (tenant_id, entity_id, valid_time, value_key, value) or (tenant_id, entity_id, valid_time, valid_time_end, value_key, value)
+    This function ensures atomicity: either all operations succeed and are committed,
+    or all operations are rolled back if any error occurs. No partial writes are possible.
+
+    - value_rows: iterable of (tenant_id, valid_time, entity_id, value_key, value) or (tenant_id, valid_time, valid_time_end, entity_id, value_key, value)
     - metadata_rows: iterable of (valid_time, {metadata_key: value, ...})
     
     Note: metadata is tenant-specific. The tenant_id parameter is used for metadata insertion.
@@ -141,9 +144,16 @@ def insert_run_with_values_and_metadata(
         known_time: Time of knowledge - when the data was known/available.
                    If not provided, defaults to inserted_at (now()) in the database.
                    Useful for backfill operations where data is inserted later.
+    
+    Raises:
+        Exception: Any exception raised during insertion will cause a complete rollback
+                  of the transaction, ensuring no partial writes.
     """
 
     with psycopg.connect(conninfo) as conn:
+        # Use transaction context manager to ensure atomicity
+        # If any exception occurs, the transaction will automatically rollback
+        # This ensures either all operations succeed or none do (no partial writes)
         with conn.transaction():
             # insert run (uses db.insert.insert_run)
             insert_run(
@@ -158,7 +168,6 @@ def insert_run_with_values_and_metadata(
             )
 
             # insert values (uses db.insert.insert_values)
-            # Note: value_rows should already include tenant_id and entity_id as the first two elements of each tuple
             insert_values(conn, run_id=run_id, value_rows=value_rows)
 
             insert_metadata(conn, run_id=run_id, tenant_id=tenant_id, metadata_rows=metadata_rows)

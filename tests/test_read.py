@@ -9,9 +9,9 @@ def test_read_values_flat_mode(clean_db, sample_run_id, sample_tenant_id, sample
     """Test reading values in flat mode."""
     # Insert run with values
     value_rows = [
-        (sample_tenant_id, sample_entity_id, sample_datetime, "mean", 100.5),
-        (sample_tenant_id, sample_entity_id, sample_datetime + timedelta(hours=1), "mean", 101.0),
-        (sample_tenant_id, sample_entity_id, sample_datetime, "quantile:0.5", 99.5),
+        (sample_tenant_id, sample_datetime, sample_entity_id, "mean", 100.5),
+        (sample_tenant_id, sample_datetime + timedelta(hours=1), sample_entity_id, "mean", 101.0),
+        (sample_tenant_id, sample_datetime, sample_entity_id, "quantile:0.5", 99.5),
     ]
     
     insert.insert_run_with_values(
@@ -47,8 +47,8 @@ def test_read_values_overlapping_mode(clean_db, sample_run_id, sample_tenant_id,
     """Test reading values in overlapping mode."""
     # Insert run with values
     value_rows = [
-        (sample_tenant_id, sample_entity_id, sample_datetime, "mean", 100.5),
-        (sample_tenant_id, sample_entity_id, sample_datetime + timedelta(hours=1), "mean", 101.0),
+        (sample_tenant_id, sample_datetime, sample_entity_id, "mean", 100.5),
+        (sample_tenant_id, sample_datetime + timedelta(hours=1), sample_entity_id, "mean", 101.0),
     ]
     
     insert.insert_run_with_values(
@@ -81,10 +81,10 @@ def test_read_values_filter_by_valid_time(clean_db, sample_run_id, sample_tenant
     """Test filtering by valid_time range."""
     # Insert values at different times
     value_rows = [
-        (sample_tenant_id, sample_entity_id, sample_datetime, "mean", 100.0),
-        (sample_tenant_id, sample_entity_id, sample_datetime + timedelta(hours=1), "mean", 101.0),
-        (sample_tenant_id, sample_entity_id, sample_datetime + timedelta(hours=2), "mean", 102.0),
-        (sample_tenant_id, sample_entity_id, sample_datetime + timedelta(hours=3), "mean", 103.0),
+        (sample_tenant_id, sample_datetime, sample_entity_id, "mean", 100.0),
+        (sample_tenant_id, sample_datetime + timedelta(hours=1), sample_entity_id, "mean", 101.0),
+        (sample_tenant_id, sample_datetime + timedelta(hours=2), sample_entity_id, "mean", 102.0),
+        (sample_tenant_id, sample_datetime + timedelta(hours=3), sample_entity_id, "mean", 103.0),
     ]
     
     insert.insert_run_with_values(

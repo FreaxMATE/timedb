@@ -15,6 +15,12 @@ CREATE TABLE IF NOT EXISTS metadata_table (
 
   -- Context key (same as values_table context)
   run_id        uuid NOT NULL REFERENCES runs_table(run_id) ON DELETE CASCADE,
+  
+  -- Tenant identifier for multi-tenant support
+  -- Single-tenant installs will use a fixed default tenant UUID
+  -- Metadata can be tenant-specific at the same (run_id, valid_time)
+  tenant_id     uuid NOT NULL,
+  
   valid_time    timestamptz NOT NULL,
 
   -- Name of the metadata field, e.g. 'contractId', 'deliveryStart'
@@ -40,13 +46,13 @@ CREATE TABLE IF NOT EXISTS metadata_table (
   )
 );
 
--- One metadata field per key per context
+-- One metadata field per key per context (tenant-specific)
 CREATE UNIQUE INDEX IF NOT EXISTS metadata_context_key_uniq
-  ON metadata_table (run_id, valid_time, metadata_key);
+  ON metadata_table (run_id, tenant_id, valid_time, metadata_key);
 
 -- Speeds up joining metadata onto values
 CREATE INDEX IF NOT EXISTS metadata_context_idx
-  ON metadata_table (run_id, valid_time);
+  ON metadata_table (run_id, tenant_id, valid_time);
 
 -- Speeds up filtering by metadata_key
 CREATE INDEX IF NOT EXISTS metadata_key_idx

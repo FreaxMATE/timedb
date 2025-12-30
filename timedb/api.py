@@ -67,8 +67,10 @@ class RecordUpdateRequest(BaseModel):
     - Set to a value to update it
     """
     run_id: str
+    tenant_id: str
     valid_time: datetime
-    series_key: str
+    entity_id: str
+    value_key: str
     value: Optional[float] = Field(default=None, description="Omit to leave unchanged, null to clear, or provide a value")
     comment: Optional[str] = Field(default=None, description="Omit to leave unchanged, null to clear, or provide a value")
     tags: Optional[List[str]] = Field(default=None, description="Omit to leave unchanged, null or [] to clear, or provide tags")
@@ -271,11 +273,13 @@ async def update_records(request: UpdateRecordsRequest):
         # Convert request updates to RecordUpdate objects
         updates = []
         for req_update in request.updates:
-            # Parse run_id
+            # Parse UUIDs
             try:
                 run_id_uuid = uuid.UUID(req_update.run_id)
-            except ValueError:
-                raise HTTPException(status_code=400, detail=f"Invalid run_id format: {req_update.run_id}")
+                tenant_id_uuid = uuid.UUID(req_update.tenant_id)
+                entity_id_uuid = uuid.UUID(req_update.entity_id)
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=f"Invalid UUID format: {e}")
             
             # Ensure timezone-aware datetime
             valid_time = req_update.valid_time
@@ -289,8 +293,10 @@ async def update_records(request: UpdateRecordsRequest):
             # Build update dict with _UNSET for fields not provided
             update_dict = {
                 "run_id": run_id_uuid,
+                "tenant_id": tenant_id_uuid,
                 "valid_time": valid_time,
-                "series_key": req_update.series_key,
+                "entity_id": entity_id_uuid,
+                "value_key": req_update.value_key,
                 "changed_by": req_update.changed_by,
             }
             
@@ -321,8 +327,10 @@ async def update_records(request: UpdateRecordsRequest):
         updated = [
             {
                 "run_id": str(r.key.run_id),
+                "tenant_id": str(r.key.tenant_id),
                 "valid_time": r.key.valid_time.isoformat(),
-                "series_key": r.key.series_key,
+                "entity_id": str(r.key.entity_id),
+                "value_key": r.key.value_key,
                 "version_id": r.version_id
             }
             for r in outcome.updated
@@ -331,8 +339,10 @@ async def update_records(request: UpdateRecordsRequest):
         skipped = [
             {
                 "run_id": str(k.run_id),
+                "tenant_id": str(k.tenant_id),
                 "valid_time": k.valid_time.isoformat(),
-                "series_key": k.series_key
+                "entity_id": str(k.entity_id),
+                "value_key": k.value_key
             }
             for k in outcome.skipped_no_ops
         ]

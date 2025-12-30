@@ -3,12 +3,8 @@ import psycopg
 import json
 from typing import Optional, Iterable, Tuple, Any, Dict
 from datetime import datetime
-from importlib import resources
 
-from .insert import insert_run, insert_values
-
-# Read packaged SQL
-SQL_INSERT_METADATA = resources.files("timedb").joinpath("sql", "pg_insert_table_with_metadata.sql").read_text(encoding="utf-8")
+from pg_insert_table import insert_run, insert_values
 
 
 def _choose_typed_slots(val: Any):
@@ -73,21 +69,14 @@ def _choose_typed_slots(val: Any):
 def insert_metadata(
     conn: psycopg.Connection,
     run_id,
-    tenant_id,
     metadata_rows: Optional[Iterable[Tuple[datetime, dict]]] = None,
 ) -> None:
-    """
-    Insert metadata for a run.
-    
-    Metadata is tenant-specific, so tenant_id is required to support different
-    metadata values for different tenants at the same (run_id, valid_time).
-    """
 
     if metadata_rows is None:
         metadata_rows = []
 
     # prepare metadata insert tuples:
-    # (run_id, tenant_id, valid_time, metadata_key, value_number, value_string, value_bool, value_time, value_json)
+    # (run_id, valid_time, metadata_key, value_number, value_string, value_bool, value_time, value_json)
     meta_inserts = []
     for valid_time, meta_dict in metadata_rows:
         if isinstance(valid_time, datetime) and valid_time.tzinfo is None:
@@ -101,14 +90,28 @@ def insert_metadata(
             if v_num is None and v_str is None and v_bool is None and v_time is None and v_json is None:
                 continue
             meta_inserts.append(
-                (run_id, tenant_id, valid_time, metadata_key, v_num, v_str, v_bool, v_time, v_json)
+                (run_id, valid_time, metadata_key, v_num, v_str, v_bool, v_time, v_json)
             )
 
     # upsert metadata into metadata_table
     if meta_inserts:
         with conn.cursor() as cur:
             cur.executemany(
-                SQL_INSERT_METADATA,
+                """
+                INSERT INTO metadata_table (
+                    run_id, valid_time, metadata_key,
+                    value_number, value_string, value_bool, value_time, value_json,
+                    inserted_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, now())
+                ON CONFLICT (run_id, valid_time, metadata_key) DO UPDATE
+                    SET value_number = EXCLUDED.value_number,
+                        value_string = EXCLUDED.value_string,
+                        value_bool   = EXCLUDED.value_bool,
+                        value_time   = EXCLUDED.value_time,
+                        value_json   = EXCLUDED.value_json,
+                        inserted_at  = now();
+                """,
                 meta_inserts,
             )
 
@@ -116,51 +119,35 @@ def insert_run_with_values_and_metadata(
     conninfo: str,
     *,
     run_id,
-    tenant_id,
     workflow_id: str,
     run_start_time: datetime,
     run_finish_time: Optional[datetime],
-    value_rows: Iterable[Tuple],  # accepts (tenant_id, entity_id, valid_time, value_key, value) or (tenant_id, entity_id, valid_time, valid_time_end, value_key, value)
-    known_time: Optional[datetime] = None,
+    value_rows: Iterable[Tuple[datetime, str, Optional[float]]],
     run_params: Optional[Dict] = None,
     metadata_rows: Optional[Iterable[Tuple[datetime, dict]]] = None,
 ) -> None:
     """
     Atomically insert run, values and metadata.
 
-    - value_rows: iterable of (tenant_id, entity_id, valid_time, value_key, value) or (tenant_id, entity_id, valid_time, valid_time_end, value_key, value)
+    - value_rows: iterable of (valid_time, value_key, value)
     - metadata_rows: iterable of (valid_time, {metadata_key: value, ...})
-    
-    Note: metadata is tenant-specific. The tenant_id parameter is used for metadata insertion.
-    If value_rows contain multiple tenant_ids, you may need to call insert_metadata separately
-    for each tenant, or pass the appropriate tenant_id for the metadata context.
-    
-    Args:
-        tenant_id: Tenant ID for the run entry in runs_table and for metadata insertion
-                  (may differ from tenant_ids in value_rows)
-        known_time: Time of knowledge - when the data was known/available.
-                   If not provided, defaults to inserted_at (now()) in the database.
-                   Useful for backfill operations where data is inserted later.
     """
 
     with psycopg.connect(conninfo) as conn:
         with conn.transaction():
-            # insert run (uses db.insert.insert_run)
+            # insert run (uses pg_insert_table.insert_run)
             insert_run(
                 conn,
                 run_id=run_id,
-                tenant_id=tenant_id,
                 workflow_id=workflow_id,
                 run_start_time=run_start_time,
                 run_finish_time=run_finish_time,
-                known_time=known_time,
                 run_params=run_params,
             )
 
-            # insert values (uses db.insert.insert_values)
-            # Note: value_rows should already include tenant_id and entity_id as the first two elements of each tuple
+            # insert values (uses pg_insert_table.insert_values)
             insert_values(conn, run_id=run_id, value_rows=value_rows)
 
-            insert_metadata(conn, run_id=run_id, tenant_id=tenant_id, metadata_rows=metadata_rows)
+            insert_metadata(conn, run_id=run_id, metadata_rows=metadata_rows)
 
     print("Inserted run + values + metadata (atomic).")

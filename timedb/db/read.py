@@ -5,6 +5,7 @@ from sqlalchemy import create_engine
 from datetime import datetime, timezone
 from typing import Optional, Literal
 from importlib import resources
+import uuid
 
 load_dotenv()
 
@@ -15,6 +16,7 @@ SQL_QUERY = resources.files("timedb").joinpath("sql", "pg_read_table.sql").read_
 def read_values_between(
     conninfo: str,
     *,
+    tenant_id: Optional[uuid.UUID] = None,
     start_valid: Optional[datetime] = None,
     end_valid: Optional[datetime] = None,
     start_known: Optional[datetime] = None,
@@ -42,6 +44,11 @@ def read_values_between(
     
     # Build WHERE clause filters
     filters = []
+    
+    # Tenant filter (required for multi-tenant, optional for single-tenant)
+    if tenant_id is not None:
+        filters.append("v.tenant_id = %(tenant_id)s")
+        filters.append("r.tenant_id = %(tenant_id)s")
     
     # Time range filters
     if start_valid is not None:
@@ -71,13 +78,14 @@ def read_values_between(
             v.value_key,
             v.value
         FROM values_table v
-        JOIN runs_table r ON v.run_id = r.run_id
+        JOIN runs_table r ON v.run_id = r.run_id AND v.tenant_id = r.tenant_id
         {where_clause}
         ORDER BY v.valid_time, COALESCE(v.valid_time_end, v.valid_time), v.value_key, r.known_time DESC;
         """
         
         engine = create_engine(conninfo)
         params = {
+            "tenant_id": tenant_id,
             "start_valid": start_valid,
             "end_valid": end_valid,
             "start_known": start_known,
@@ -100,13 +108,14 @@ def read_values_between(
             v.value_key,
             v.value
         FROM values_table v
-        JOIN runs_table r ON v.run_id = r.run_id
+        JOIN runs_table r ON v.run_id = r.run_id AND v.tenant_id = r.tenant_id
         {where_clause}
         ORDER BY r.known_time, v.valid_time, v.value_key;
         """
         
         engine = create_engine(conninfo)
         params = {
+            "tenant_id": tenant_id,
             "start_valid": start_valid,
             "end_valid": end_valid,
             "start_known": start_known,

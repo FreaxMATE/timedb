@@ -46,7 +46,7 @@ def get_fingrid_data(fingrid_dataset, start_time, end_time):
     df = df.sort_index()
     df.loc[:, "value"] = df["value"].astype(float)
     df = df.reset_index()
-    df["series_key"] = fingrid_dataset[0]
+    df["value_key"] = fingrid_dataset[0]
 
     return df
 
@@ -68,19 +68,23 @@ def main():
     df_capacity = get_fingrid_data(("capacity", 268), start_time, end_time)
 
     df = pd.concat([df_forecast, df_capacity])
-    df["run_id"] = run_id
-    value_rows = list(
-        df[["run_id", "valid_time", "series_key", "value"]].itertuples(
-            index=False,
-            name=None
-        )
-    )
+    
+    # Generate tenant_id and entity_id (in production, these would come from context)
+    tenant_id = uuid.uuid4()
+    entity_id = uuid.uuid4()
+    
+    # Prepare value_rows in the format: (tenant_id, entity_id, valid_time, value_key, value)
+    value_rows = [
+        (tenant_id, entity_id, row["valid_time"], row["value_key"], row["value"])
+        for _, row in df.iterrows()
+    ]
 
     run_finish_time = datetime.now(timezone.utc)
 
     insert_run_with_values(
         conninfo=os.getenv("NEON_PG_URL"),
-        run_id=run_id,
+        run_id=uuid.UUID(run_id),
+        tenant_id=tenant_id,
         workflow_id=workflow_id,
         run_start_time=run_start_time,
         run_finish_time=run_finish_time,

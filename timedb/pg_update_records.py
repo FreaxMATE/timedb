@@ -22,7 +22,6 @@ import uuid
 import datetime as dt
 from importlib import resources
 from dotenv import load_dotenv
-
 import psycopg
 from psycopg.rows import dict_row
 
@@ -305,21 +304,13 @@ def update_records(conn: psycopg.Connection, updates: Iterable[RecordUpdate]) ->
                     continue  # nothing to do for this key
 
                 # 6) Unset previous current row (0 or 1 rows)
-                cur.execute(sql_unset_current, {
-                    "run_id": run_id,
-                    "tenant_id": tenant_id,
-                    "valid_time": valid_time,
-                    "entity_id": entity_id,
-                    "value_key": value_key
-                })
+                cur.execute(sql_unset_current, {"run_id": run_id, "valid_time": valid_time, "series_key": series_key})
 
                 # 7) Insert new current version
                 cur.execute(sql_insert_new, {
                     "run_id": run_id,
-                    "tenant_id": tenant_id,
                     "valid_time": valid_time,
-                    "entity_id": entity_id,
-                    "value_key": value_key,
+                    "series_key": series_key,
                     "value": new_value,
                     "comment": new_comment,
                     "tags": new_tags,        # None => SQL NULL; list => text[]
@@ -363,23 +354,19 @@ if __name__ == "__main__":
     with psycopg.connect(conninfo) as conn:
         # Create a run to reference
         run_id = uuid.uuid4()
-        tenant_id = uuid.uuid4()  # In production, this would come from context
         with conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO runs_table (run_id, tenant_id, workflow_id, run_start_time) VALUES (%s, %s, %s, %s)",
-                (run_id, tenant_id, "demo-workflow", dt.datetime.now(tz=dt.timezone.utc)),
+                "INSERT INTO runs_table (run_id, workflow_id, run_start_time) VALUES (%s, %s, %s)",
+                (run_id, "demo-workflow", dt.datetime.now(tz=dt.timezone.utc)),
             )
 
         t = dt.datetime(2025, 12, 27, 12, 0, tzinfo=dt.timezone.utc)
-        entity_id = uuid.uuid4()  # In production, this would come from context
 
         # 1) Create first version (value provided; may be None explicitly)
         upd = RecordUpdate(
             run_id=run_id,
-            tenant_id=tenant_id,
             valid_time=t,
-            entity_id=entity_id,
-            value_key="quantile:0.5",
+            series_key="quantile:0.5",
             value=123.4,
             comment="initial value",
             tags=["Icing", "Review"],
@@ -392,10 +379,8 @@ if __name__ == "__main__":
         # 2) Update only comment (leave value/tags unchanged)
         upd2 = RecordUpdate(
             run_id=run_id,
-            tenant_id=tenant_id,
             valid_time=t,
-            entity_id=entity_id,
-            value_key="quantile:0.5",
+            series_key="quantile:0.5",
             comment="  checked  ",   # trimmed to "checked"
             # value/tags left as _UNSET => unchanged
             changed_by="demo",
@@ -407,10 +392,8 @@ if __name__ == "__main__":
         # 3) Clear tags explicitly
         upd3 = RecordUpdate(
             run_id=run_id,
-            tenant_id=tenant_id,
             valid_time=t,
-            entity_id=entity_id,
-            value_key="quantile:0.5",
+            series_key="quantile:0.5",
             tags=[],   # explicit clear -> stored as NULL (canonical)
             changed_by="demo",
         )

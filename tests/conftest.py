@@ -74,7 +74,7 @@ def sample_tenant_id():
 
 
 @pytest.fixture
-def sample_entity_id():
-    """Generate a sample entity ID for testing."""
+def sample_series_id():
+    """Generate a sample series ID for testing."""
     return uuid.uuid4()
 

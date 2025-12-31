@@ -120,7 +120,7 @@ def insert_run_with_values_and_metadata(
     workflow_id: str,
     run_start_time: datetime,
     run_finish_time: Optional[datetime],
-    value_rows: Iterable[Tuple],  # accepts (tenant_id, valid_time, entity_id, value_key, value) or (tenant_id, valid_time, valid_time_end, entity_id, value_key, value)
+    value_rows: Iterable[Tuple],  # accepts (tenant_id, valid_time, series_id, value) or (tenant_id, valid_time, valid_time_end, series_id, value)
     known_time: Optional[datetime] = None,
     run_params: Optional[Dict] = None,
     metadata_rows: Optional[Iterable[Tuple[datetime, dict]]] = None,
@@ -131,7 +131,7 @@ def insert_run_with_values_and_metadata(
     This function ensures atomicity: either all operations succeed and are committed,
     or all operations are rolled back if any error occurs. No partial writes are possible.
 
-    - value_rows: iterable of (tenant_id, valid_time, entity_id, value_key, value) or (tenant_id, valid_time, valid_time_end, entity_id, value_key, value)
+    - value_rows: iterable of (tenant_id, valid_time, series_id, value) or (tenant_id, valid_time, valid_time_end, series_id, value)
     - metadata_rows: iterable of (valid_time, {metadata_key: value, ...})
     
     Note: metadata is tenant-specific. The tenant_id parameter is used for metadata insertion.

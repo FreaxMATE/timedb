@@ -34,7 +34,7 @@ def main():
     # Create multiple forecast runs for the same time period
     base_time = datetime(2025, 1, 1, 12, 0, tzinfo=timezone.utc)
     tenant_id = uuid.uuid4()  # In production, this would come from context
-    entity_id = uuid.uuid4()  # In production, this would come from context
+    series_id = uuid.uuid4()  # In production, this would come from context
     
     print("\n2. Creating multiple forecast runs...")
     
@@ -43,7 +43,7 @@ def main():
     run1_time = base_time - timedelta(hours=2)  # Forecast made 2 hours before
     
     value_rows_1 = [
-        (tenant_id, base_time + timedelta(hours=i), entity_id, "mean", 100.0 + i * 0.5)
+        (tenant_id, base_time + timedelta(hours=i), series_id, "mean", 100.0 + i * 0.5)
         for i in range(6)
     ]
     
@@ -63,7 +63,7 @@ def main():
     run2_time = base_time - timedelta(hours=1)  # Forecast made 1 hour before
     
     value_rows_2 = [
-        (tenant_id, base_time + timedelta(hours=i), entity_id, "mean", 102.0 + i * 0.6)  # Slightly different values
+        (tenant_id, base_time + timedelta(hours=i), series_id, "mean", 102.0 + i * 0.6)  # Slightly different values
         for i in range(6)
     ]
     

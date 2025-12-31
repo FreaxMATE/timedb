@@ -3,8 +3,9 @@ SELECT
   v.valid_time,
   v.run_id,
   v.tenant_id,
-  v.entity_id,
-  v.value_key,
+  v.series_id,
+  s.series_key,
+  s.series_unit,
   v.value,
   v.comment,
   v.tags,
@@ -13,6 +14,8 @@ SELECT
 FROM runs_table r
 JOIN values_table v
   ON v.run_id = r.run_id AND v.tenant_id = r.tenant_id
+JOIN series_table s
+  ON v.series_id = s.series_id
 WHERE v.is_current = true
   AND (%(tenant_id)s   IS NULL OR v.tenant_id = %(tenant_id)s)
   AND (%(start_valid)s IS NULL OR v.valid_time >= %(start_valid)s)
@@ -20,4 +23,3 @@ WHERE v.is_current = true
   AND (%(start_run)s   IS NULL OR r.run_start_time >= %(start_run)s)
   AND (%(end_run)s     IS NULL OR r.run_start_time <  %(end_run)s)
 ORDER BY r.run_start_time, v.valid_time;
-

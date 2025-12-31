@@ -7,6 +7,7 @@ from . import insert_with_metadata
 from . import read
 from . import update
 from . import delete
+from . import series
 
 __all__ = [
     "create",
@@ -16,4 +17,5 @@ __all__ = [
     "read",
     "update",
     "delete",
+    "series",
 ]

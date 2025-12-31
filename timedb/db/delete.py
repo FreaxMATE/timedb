@@ -11,7 +11,8 @@ load_dotenv()
 #   2) current_values_table view
 #   3) metadata_table
 #   4) values_table
-#   5) runs_table
+#   5) series_table
+#   6) runs_table
 #
 # Uses CASCADE to handle foreign key dependencies automatically.
 # -----------------------------------------------------------------------------
@@ -32,8 +33,10 @@ def delete_schema(conninfo: str) -> None:
             cur.execute("DROP VIEW IF EXISTS current_values_table CASCADE;")
             
             # Drop tables in correct order (respecting foreign key constraints)
+            # Note: values_table has a foreign key to series_table, so drop values_table first
             cur.execute("DROP TABLE IF EXISTS metadata_table CASCADE;")
             cur.execute("DROP TABLE IF EXISTS values_table CASCADE;")
+            cur.execute("DROP TABLE IF EXISTS series_table CASCADE;")
             cur.execute("DROP TABLE IF EXISTS runs_table CASCADE;")
             
             conn.commit()

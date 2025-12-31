@@ -36,14 +36,14 @@ def main():
     print("\n2. Inserting a forecast run with values...")
     run_id = uuid.uuid4()
     tenant_id = uuid.uuid4()  # In production, this would come from context
-    entity_id = uuid.uuid4()  # In production, this would come from context
+    series_id = uuid.uuid4()  # In production, this would come from context
     workflow_id = "example-forecast"
     run_start_time = datetime.now(timezone.utc)
     
     # Create some sample time series data
     base_time = datetime(2025, 1, 1, 0, 0, tzinfo=timezone.utc)
     value_rows = [
-        (tenant_id, base_time + timedelta(hours=i), entity_id, "mean", 100.0 + i * 0.5)
+        (tenant_id, base_time + timedelta(hours=i), series_id, "mean", 100.0 + i * 0.5)
         for i in range(24)  # 24 hours of data
     ]
     

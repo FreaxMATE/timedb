@@ -3,25 +3,40 @@ TimeDB - A time series database for PostgreSQL.
 
 High-level SDK usage:
     import timedb as td
+    import pint
+    ureg = pint.UnitRegistry()
     
     # Create schema
     td.create()
     
-    # Insert run with DataFrame (minimal - only DataFrame required!)
-    result = td.insert_run(
-        df=df,  # Only required parameter for single-tenant installations
-    )
-    # result.entity_id can be saved for future updates
+    # Insert run with DataFrame containing Pint Quantity columns
+    # Each column (except time columns) becomes a separate series
+    df = pd.DataFrame({
+        "valid_time": times,
+        "power": power_vals_kW * ureg.kW,              # Series with kW unit
+        "wind_speed": wind_vals_m_s * (ureg.meter / ureg.second),  # Series with m/s unit
+        "temperature": temp_vals_C * ureg.degC          # Series with degC unit
+    })
     
-    # Insert run with DataFrame (with explicit IDs for multi-tenant)
+    result = td.insert_run(df=df)
+    # result.series_ids = {
+    #     'power': <uuid>,
+    #     'wind_speed': <uuid>,
+    #     'temperature': <uuid>
+    # }
+    
+    # With custom series keys
     result = td.insert_run(
         df=df,
-        tenant_id=tenant_id,  # Optional: only needed for multi-tenant
-        entity_id=entity_id,  # Optional: provide if you want to update this entity later
+        series_key_overrides={
+            'power': 'wind_power_forecast',
+            'wind_speed': 'wind_speed_measured'
+        }
     )
 """
 
-from .sdk import create, delete, insert_run, read, InsertResult, DEFAULT_TENANT_ID
+from .sdk import create, delete, insert_run, read, read_values_flat, read_values_overlapping, InsertResult, DEFAULT_TENANT_ID
+from .units import IncompatibleUnitError
 
-__all__ = ['create', 'delete', 'insert_run', 'read', 'InsertResult', 'DEFAULT_TENANT_ID']
+__all__ = ['create', 'delete', 'insert_run', 'read', 'read_values_flat', 'read_values_overlapping', 'InsertResult', 'DEFAULT_TENANT_ID', 'IncompatibleUnitError']
 

@@ -108,11 +108,11 @@ Schema columns provides additional attributes to the values according to:
 | `changed_by`  | User or service responsible for the change                       |
 
 ## Roadmap
-- [ ] Decouple the knowledge time from the run_time
+- [x] Decouple the knowledge time from the run_time
+- [ ] Python SDK that allows time series data manipulations, reads and writes
 - [ ] RESTful API layer that serves data to users
 - [ ] Handle different time zones in the API layer while always storing in UTC in the database. 
 - [ ] Support for postgres time intervals (tsrange/tstzrange)
 - [ ] Built in data retention, TTL, and archiving
 - [ ] Support for subscribing to database updates through the API 
-- [ ] Python SDK that allows time series data manipulations, reads and writes
 - [ ] Unit handling (e.g. MW, kW)

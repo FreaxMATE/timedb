@@ -5,13 +5,13 @@ from datetime import datetime, timezone, timedelta
 from timedb.db import insert, read
 
 
-def test_read_values_flat_mode(clean_db, sample_run_id, sample_tenant_id, sample_entity_id, sample_workflow_id, sample_datetime):
+def test_read_values_flat_mode(clean_db, sample_run_id, sample_tenant_id, sample_series_id, sample_workflow_id, sample_datetime):
     """Test reading values in flat mode."""
     # Insert run with values
     value_rows = [
-        (sample_tenant_id, sample_datetime, sample_entity_id, "mean", 100.5),
-        (sample_tenant_id, sample_datetime + timedelta(hours=1), sample_entity_id, "mean", 101.0),
-        (sample_tenant_id, sample_datetime, sample_entity_id, "quantile:0.5", 99.5),
+        (sample_tenant_id, sample_datetime, sample_series_id, "mean", 100.5),
+        (sample_tenant_id, sample_datetime + timedelta(hours=1), sample_series_id, "mean", 101.0),
+        (sample_tenant_id, sample_datetime, sample_series_id, "quantile:0.5", 99.5),
     ]
     
     insert.insert_run_with_values(
@@ -43,12 +43,12 @@ def test_read_values_flat_mode(clean_db, sample_run_id, sample_tenant_id, sample
     assert df.loc[(sample_datetime, "quantile:0.5"), "value"] == 99.5
 
 
-def test_read_values_overlapping_mode(clean_db, sample_run_id, sample_tenant_id, sample_entity_id, sample_workflow_id, sample_datetime):
+def test_read_values_overlapping_mode(clean_db, sample_run_id, sample_tenant_id, sample_series_id, sample_workflow_id, sample_datetime):
     """Test reading values in overlapping mode."""
     # Insert run with values
     value_rows = [
-        (sample_tenant_id, sample_datetime, sample_entity_id, "mean", 100.5),
-        (sample_tenant_id, sample_datetime + timedelta(hours=1), sample_entity_id, "mean", 101.0),
+        (sample_tenant_id, sample_datetime, sample_series_id, "mean", 100.5),
+        (sample_tenant_id, sample_datetime + timedelta(hours=1), sample_series_id, "mean", 101.0),
     ]
     
     insert.insert_run_with_values(
@@ -77,14 +77,14 @@ def test_read_values_overlapping_mode(clean_db, sample_run_id, sample_tenant_id,
     assert "known_time" in df.index.names
 
 
-def test_read_values_filter_by_valid_time(clean_db, sample_run_id, sample_tenant_id, sample_entity_id, sample_workflow_id, sample_datetime):
+def test_read_values_filter_by_valid_time(clean_db, sample_run_id, sample_tenant_id, sample_series_id, sample_workflow_id, sample_datetime):
     """Test filtering by valid_time range."""
     # Insert values at different times
     value_rows = [
-        (sample_tenant_id, sample_datetime, sample_entity_id, "mean", 100.0),
-        (sample_tenant_id, sample_datetime + timedelta(hours=1), sample_entity_id, "mean", 101.0),
-        (sample_tenant_id, sample_datetime + timedelta(hours=2), sample_entity_id, "mean", 102.0),
-        (sample_tenant_id, sample_datetime + timedelta(hours=3), sample_entity_id, "mean", 103.0),
+        (sample_tenant_id, sample_datetime, sample_series_id, "mean", 100.0),
+        (sample_tenant_id, sample_datetime + timedelta(hours=1), sample_series_id, "mean", 101.0),
+        (sample_tenant_id, sample_datetime + timedelta(hours=2), sample_series_id, "mean", 102.0),
+        (sample_tenant_id, sample_datetime + timedelta(hours=3), sample_series_id, "mean", 103.0),
     ]
     
     insert.insert_run_with_values(
@@ -114,7 +114,7 @@ def test_read_values_filter_by_valid_time(clean_db, sample_run_id, sample_tenant
     )
 
 
-def test_read_values_all_versions(clean_db_for_update, sample_run_id, sample_tenant_id, sample_entity_id, sample_workflow_id, sample_datetime):
+def test_read_values_all_versions(clean_db_for_update, sample_run_id, sample_tenant_id, sample_series_id, sample_workflow_id, sample_datetime):
     """Test reading all versions (including non-current)."""
     from timedb.db.update import RecordUpdate, update_records
     import psycopg
@@ -127,8 +127,8 @@ def test_read_values_all_versions(clean_db_for_update, sample_run_id, sample_ten
                 (sample_run_id, sample_tenant_id, sample_workflow_id, sample_datetime),
             )
             cur.execute(
-                "INSERT INTO values_table (run_id, tenant_id, entity_id, valid_time, value_key, value, is_current) VALUES (%s, %s, %s, %s, %s, %s, true)",
-                (sample_run_id, sample_tenant_id, sample_entity_id, sample_datetime, "mean", 100.0),
+                "INSERT INTO values_table (run_id, tenant_id, series_id, valid_time, value_key, value, is_current) VALUES (%s, %s, %s, %s, %s, %s, true)",
+                (sample_run_id, sample_tenant_id, sample_series_id, sample_datetime, "mean", 100.0),
             )
     
     # Update the value (creates a new version)
@@ -137,7 +137,7 @@ def test_read_values_all_versions(clean_db_for_update, sample_run_id, sample_ten
             run_id=sample_run_id,
             tenant_id=sample_tenant_id,
             valid_time=sample_datetime,
-            entity_id=sample_entity_id,
+            series_id=sample_series_id,
             value_key="mean",
             value=101.0,
             changed_by="test",

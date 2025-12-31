@@ -6,12 +6,13 @@ Key conventions:
  - At the Python API level, every updatable field is tri-state:
      _UNSET => leave unchanged (field not provided)
      None   => explicitly set SQL NULL (clear)
-     value  => set to that value
+     value  => set to that concrete value
  - Canonicalization:
      comment: empty or whitespace-only -> SQL NULL
      tags: empty iterable or tags that normalize away -> SQL NULL
      tags normalized -> strip/lower/dedupe/sort (treated as a set)
  - No-op updates (canonicalized new == canonicalized current) are skipped.
+ - Values must be in the canonical unit for the series (unit conversion should happen before calling update_records).
 """
 from __future__ import annotations
 
@@ -42,8 +43,7 @@ class RecordKey:
     run_id: uuid.UUID
     tenant_id: uuid.UUID
     valid_time: dt.datetime
-    entity_id: uuid.UUID
-    value_key: str
+    series_id: uuid.UUID
 
 
 @dataclass(frozen=True)
@@ -57,11 +57,10 @@ class RecordUpdate:
     run_id: uuid.UUID
     tenant_id: uuid.UUID
     valid_time: dt.datetime           # tz-aware
-    entity_id: uuid.UUID
-    value_key: str
+    series_id: uuid.UUID
 
     # Use Any so callers can pass floats, None, or the _UNSET sentinel
-    value: Any = _UNSET                 # float | None | _UNSET
+    value: Any = _UNSET                 # float | None | _UNSET (must be in canonical unit for series)
     comment: Any = _UNSET               # str   | None | _UNSET
     tags: Any = _UNSET                  # Sequence[str] | None | _UNSET
 
@@ -174,20 +173,21 @@ def update_records(conn: psycopg.Connection, updates: Iterable[RecordUpdate]) ->
     Batch, concurrency-safe versioned updates for values_table using _UNSET sentinel.
 
     Rules:
-      - For each key (run_id, tenant_id, valid_time, entity_id, value_key):
+      - For each key (run_id, tenant_id, valid_time, series_id):
           * Lock current row (if any) with SELECT ... FOR UPDATE
           * Compute merged canonical values with tri-state rules
           * If no current row: caller must provide `value` (explicitly; may be None)
           * If canonical new == canonical current => skip (no-op)
           * Otherwise: unset old current row (is_current=false) and insert new current row
       - Returns lists of updated rows and skipped no-op keys
+      - Note: Values must be in the canonical unit for the series (unit conversion should happen before calling this function).
     """
     updates_list = list(updates)
     if not updates_list:
         return UpdateRecordsOutcome(updated=[], skipped_no_ops=[])
 
     # Validate and collapse duplicates (last-write-wins)
-    KeyT = Tuple[uuid.UUID, uuid.UUID, dt.datetime, uuid.UUID, str]
+    KeyT = Tuple[uuid.UUID, uuid.UUID, dt.datetime, uuid.UUID]
     collapsed: Dict[KeyT, RecordUpdate] = {}
     for u in updates_list:
         if u.valid_time.tzinfo is None:
@@ -197,12 +197,12 @@ def update_records(conn: psycopg.Connection, updates: Iterable[RecordUpdate]) ->
             raise ValueError(
                 "No updates supplied: provide at least one of value/comment/tags (use _UNSET to leave fields unchanged)."
             )
-        collapsed[(u.run_id, u.tenant_id, u.valid_time, u.entity_id, u.value_key)] = u
+        collapsed[(u.run_id, u.tenant_id, u.valid_time, u.series_id)] = u
 
     # Deterministic order reduces deadlock risk
     ordered_items = sorted(
         collapsed.items(),
-        key=lambda kv: (str(kv[0][0]), str(kv[0][1]), kv[0][2].isoformat(), str(kv[0][3]), kv[0][4]),
+        key=lambda kv: (str(kv[0][0]), str(kv[0][1]), kv[0][2].isoformat(), str(kv[0][3])),
     )
 
     sql_lock_current = """
@@ -211,8 +211,7 @@ def update_records(conn: psycopg.Connection, updates: Iterable[RecordUpdate]) ->
         WHERE run_id = %(run_id)s
           AND tenant_id = %(tenant_id)s
           AND valid_time = %(valid_time)s
-          AND entity_id = %(entity_id)s
-          AND value_key = %(value_key)s
+          AND series_id = %(series_id)s
           AND is_current = true
         FOR UPDATE
     """
@@ -223,19 +222,18 @@ def update_records(conn: psycopg.Connection, updates: Iterable[RecordUpdate]) ->
         WHERE run_id = %(run_id)s
           AND tenant_id = %(tenant_id)s
           AND valid_time = %(valid_time)s
-          AND entity_id = %(entity_id)s
-          AND value_key = %(value_key)s
+          AND series_id = %(series_id)s
           AND is_current = true
     """
 
     sql_insert_new = """
         INSERT INTO values_table (
-            run_id, tenant_id, valid_time, entity_id, value_key,
+            run_id, tenant_id, valid_time, series_id,
             value, comment, tags,
             changed_by, is_current
         )
         VALUES (
-            %(run_id)s, %(tenant_id)s, %(valid_time)s, %(entity_id)s, %(value_key)s,
+            %(run_id)s, %(tenant_id)s, %(valid_time)s, %(series_id)s,
             %(value)s, %(comment)s, %(tags)s,
             %(changed_by)s, true
         )
@@ -248,16 +246,15 @@ def update_records(conn: psycopg.Connection, updates: Iterable[RecordUpdate]) ->
     # Run batch inside a transaction to maintain invariants
     with conn.transaction():
         with conn.cursor(row_factory=dict_row) as cur:
-            for (run_id, tenant_id, valid_time, entity_id, value_key), u in ordered_items:
-                key = RecordKey(run_id=run_id, tenant_id=tenant_id, valid_time=valid_time, entity_id=entity_id, value_key=value_key)
+            for (run_id, tenant_id, valid_time, series_id), u in ordered_items:
+                key = RecordKey(run_id=run_id, tenant_id=tenant_id, valid_time=valid_time, series_id=series_id)
 
                 # 1) Lock current row for this key (if it exists)
                 cur.execute(sql_lock_current, {
                     "run_id": run_id,
                     "tenant_id": tenant_id,
                     "valid_time": valid_time,
-                    "entity_id": entity_id,
-                    "value_key": value_key
+                    "series_id": series_id
                 })
                 current = cur.fetchone()
 
@@ -309,8 +306,7 @@ def update_records(conn: psycopg.Connection, updates: Iterable[RecordUpdate]) ->
                     "run_id": run_id,
                     "tenant_id": tenant_id,
                     "valid_time": valid_time,
-                    "entity_id": entity_id,
-                    "value_key": value_key
+                    "series_id": series_id
                 })
 
                 # 7) Insert new current version
@@ -318,8 +314,7 @@ def update_records(conn: psycopg.Connection, updates: Iterable[RecordUpdate]) ->
                     "run_id": run_id,
                     "tenant_id": tenant_id,
                     "valid_time": valid_time,
-                    "entity_id": entity_id,
-                    "value_key": value_key,
+                    "series_id": series_id,
                     "value": new_value,
                     "comment": new_comment,
                     "tags": new_tags,        # None => SQL NULL; list => text[]
@@ -371,15 +366,14 @@ if __name__ == "__main__":
             )
 
         t = dt.datetime(2025, 12, 27, 12, 0, tzinfo=dt.timezone.utc)
-        entity_id = uuid.uuid4()  # In production, this would come from context
+        series_id = uuid.uuid4()  # In production, this would come from context
 
         # 1) Create first version (value provided; may be None explicitly)
         upd = RecordUpdate(
             run_id=run_id,
             tenant_id=tenant_id,
             valid_time=t,
-            entity_id=entity_id,
-            value_key="quantile:0.5",
+            series_id=series_id,
             value=123.4,
             comment="initial value",
             tags=["Icing", "Review"],
@@ -394,8 +388,7 @@ if __name__ == "__main__":
             run_id=run_id,
             tenant_id=tenant_id,
             valid_time=t,
-            entity_id=entity_id,
-            value_key="quantile:0.5",
+            series_id=series_id,
             comment="  checked  ",   # trimmed to "checked"
             # value/tags left as _UNSET => unchanged
             changed_by="demo",
@@ -409,12 +402,10 @@ if __name__ == "__main__":
             run_id=run_id,
             tenant_id=tenant_id,
             valid_time=t,
-            entity_id=entity_id,
-            value_key="quantile:0.5",
+            series_id=series_id,
             tags=[],   # explicit clear -> stored as NULL (canonical)
             changed_by="demo",
         )
         out3 = update_records(conn, [upd3])
         print("Updated:", out3.updated)
         print("Skipped:", out3.skipped_no_ops)
-

@@ -39,7 +39,7 @@ def main():
     
     # Insert run and values
     tenant_id = uuid.uuid4()  # In production, this would come from context
-    entity_id = uuid.uuid4()  # In production, this would come from context
+    series_id = uuid.uuid4()  # In production, this would come from context
     with psycopg.connect(conninfo) as conn:
         with conn.cursor() as cur:
             # Insert run
@@ -51,10 +51,10 @@ def main():
             for i in range(6):
                 cur.execute(
                     """
-                    INSERT INTO values_table (run_id, tenant_id, entity_id, valid_time, value_key, value, is_current)
+                    INSERT INTO values_table (run_id, tenant_id, series_id, valid_time, value_key, value, is_current)
                     VALUES (%s, %s, %s, %s, %s, %s, true)
                     """,
-                    (run_id, tenant_id, entity_id, base_time + timedelta(hours=i), "mean", 100.0 + i * 0.5),
+                    (run_id, tenant_id, series_id, base_time + timedelta(hours=i), "mean", 100.0 + i * 0.5),
                 )
     print("   ✓ Initial forecast inserted")
     
@@ -66,7 +66,7 @@ def main():
             run_id=run_id,
             tenant_id=tenant_id,
             valid_time=base_time + timedelta(hours=2),
-            entity_id=entity_id,
+            series_id=series_id,
             value_key="mean",
             value=105.0,  # Corrected value
             comment="Manual correction: sensor reading was anomalous",
@@ -86,7 +86,7 @@ def main():
                     run_id=run_id,
                     tenant_id=tenant_id,
                     valid_time=base_time + timedelta(hours=i),
-                    entity_id=entity_id,
+                    series_id=series_id,
                     value_key="mean",
                     tags=["validated"],  # Only update tags, leave value unchanged
                     changed_by="qa-team@example.com",

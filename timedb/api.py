@@ -69,7 +69,7 @@ class RecordUpdateRequest(BaseModel):
     run_id: str
     tenant_id: str
     valid_time: datetime
-    entity_id: str
+    series_id: str
     value_key: str
     value: Optional[float] = Field(default=None, description="Omit to leave unchanged, null to clear, or provide a value")
     comment: Optional[str] = Field(default=None, description="Omit to leave unchanged, null to clear, or provide a value")
@@ -163,15 +163,26 @@ async def read_values(
         if end_known and end_known.tzinfo is None:
             end_known = end_known.replace(tzinfo=timezone.utc)
         
-        df = db.read.read_values_between(
-            dsn,
-            start_valid=start_valid,
-            end_valid=end_valid,
-            start_known=start_known,
-            end_known=end_known,
-            mode=mode,
-            all_versions=all_versions,
-        )
+        if mode == "flat":
+            df = db.read.read_values_flat(
+                dsn,
+                start_valid=start_valid,
+                end_valid=end_valid,
+                start_known=start_known,
+                end_known=end_known,
+                all_versions=all_versions,
+            )
+        elif mode == "overlapping":
+            df = db.read.read_values_overlapping(
+                dsn,
+                start_valid=start_valid,
+                end_valid=end_valid,
+                start_known=start_known,
+                end_known=end_known,
+                all_versions=all_versions,
+            )
+        else:
+            raise ValueError(f"Invalid mode: {mode}. Must be 'flat' or 'overlapping'")
         
         # Convert DataFrame to JSON-serializable format
         df_reset = df.reset_index()
@@ -277,7 +288,7 @@ async def update_records(request: UpdateRecordsRequest):
             try:
                 run_id_uuid = uuid.UUID(req_update.run_id)
                 tenant_id_uuid = uuid.UUID(req_update.tenant_id)
-                entity_id_uuid = uuid.UUID(req_update.entity_id)
+                series_id_uuid = uuid.UUID(req_update.series_id)
             except ValueError as e:
                 raise HTTPException(status_code=400, detail=f"Invalid UUID format: {e}")
             
@@ -295,7 +306,7 @@ async def update_records(request: UpdateRecordsRequest):
                 "run_id": run_id_uuid,
                 "tenant_id": tenant_id_uuid,
                 "valid_time": valid_time,
-                "entity_id": entity_id_uuid,
+                "series_id": series_id_uuid,
                 "value_key": req_update.value_key,
                 "changed_by": req_update.changed_by,
             }
@@ -329,7 +340,7 @@ async def update_records(request: UpdateRecordsRequest):
                 "run_id": str(r.key.run_id),
                 "tenant_id": str(r.key.tenant_id),
                 "valid_time": r.key.valid_time.isoformat(),
-                "entity_id": str(r.key.entity_id),
+                "series_id": str(r.key.series_id),
                 "value_key": r.key.value_key,
                 "version_id": r.version_id
             }
@@ -341,7 +352,7 @@ async def update_records(request: UpdateRecordsRequest):
                 "run_id": str(k.run_id),
                 "tenant_id": str(k.tenant_id),
                 "valid_time": k.valid_time.isoformat(),
-                "entity_id": str(k.entity_id),
+                "series_id": str(k.series_id),
                 "value_key": k.value_key
             }
             for k in outcome.skipped_no_ops

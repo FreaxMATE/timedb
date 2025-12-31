@@ -3,7 +3,7 @@ BEGIN;
 -- ============================================================================
 -- 1) runs_table
 -- ----------------------------------------------------------------------------
--- One row per worflow execution.
+-- One row per workflow execution.
 -- Stores metadata about the workflow run itself.
 -- ============================================================================
 
@@ -35,7 +35,45 @@ CREATE INDEX IF NOT EXISTS runs_workflow_start_idx
 
 
 -- ============================================================================
--- 2) values_table
+-- 2) series_table
+-- ----------------------------------------------------------------------------
+-- Stores series metadata including the canonical unit for each series.
+-- Each series has a unique series_id, a series_key (human-readable identifier),
+-- and a series_unit (canonical unit like "MW", "kW", "MWh", "dimensionless").
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS series_table (
+  -- Unique identifier for the series
+  series_id    uuid PRIMARY KEY,
+
+  -- Human-readable identifier for the series
+  -- e.g. 'wind_power_forecast', 'temperature_mean', 'energy_consumption'
+  series_key   text NOT NULL,
+
+  -- Canonical unit for this series (Pint-compatible unit string)
+  -- e.g. 'MW', 'kW', 'MWh', 'dimensionless', 'celsius'
+  -- All values stored in values_table for this series are in this unit
+  series_unit  text NOT NULL,
+
+  -- Automatically populated when the row is inserted
+  inserted_at  timestamptz NOT NULL DEFAULT now(),
+
+  -- Ensure series_key is not empty
+  CONSTRAINT series_key_not_empty
+    CHECK (length(btrim(series_key)) > 0),
+
+  -- Ensure series_unit is not empty
+  CONSTRAINT series_unit_not_empty
+    CHECK (length(btrim(series_unit)) > 0)
+);
+
+-- Index for efficient lookup by series_key
+CREATE INDEX IF NOT EXISTS series_key_idx
+  ON series_table (series_key);
+
+
+-- ============================================================================
+-- 3) values_table
 -- ----------------------------------------------------------------------------
 -- Stores forecast values.
 -- This table is VERSIONED:
@@ -55,18 +93,16 @@ CREATE TABLE IF NOT EXISTS values_table (
   -- Single-tenant installs will use a fixed default tenant UUID
   tenant_id   uuid NOT NULL,
 
-  -- Entity identifier for entity scoping
-  -- Allows multiple entities per run (e.g., different locations, assets)
-  entity_id  uuid NOT NULL,
-
   -- Timestamp values are valid for
   valid_time  timestamptz NOT NULL,
 
-  -- What kind of series this is:
-  -- e.g. 'mean', 'quantile:0.5', 'scenario:1'
-  value_key  text NOT NULL,
+  -- Foreign key to series_table
+  -- References the series this value belongs to
+  series_id   uuid NOT NULL REFERENCES series_table(series_id) ON DELETE CASCADE,
 
   -- The workflow output value itself (can be NULL)
+  -- NOTE: This value is ALWAYS in the canonical unit specified in series_table.series_unit
+  -- Unit conversion happens before insertion, so only the converted float is stored
   -- NOTE: nullable so that NULL can be a valid stored value.
   -- In the application update API, we use _UNSET to mean "leave unchanged"
   -- and None/NULL to mean "explicitly set to NULL".
@@ -88,7 +124,7 @@ CREATE TABLE IF NOT EXISTS values_table (
   changed_by  text,
   change_time timestamptz NOT NULL DEFAULT now(),
 
-  -- Exactly one row per (run_id, tenant_id, valid_time, COALESCE(valid_time_end, valid_time), entity_id, value_key) should be "current"
+  -- Exactly one row per (run_id, tenant_id, valid_time, series_id) should be "current"
   is_current  boolean NOT NULL DEFAULT true,
 
   -- --------------------------------------------------------------------------
@@ -106,29 +142,33 @@ CREATE TABLE IF NOT EXISTS values_table (
 );
 
 -- ============================================================================
--- 3) Integrity & performance indexes
+-- 4) Integrity & performance indexes
 -- ============================================================================
 
 -- Enforce that there is ONLY ONE current version per
--- (run_id, tenant_id, valid_time, COALESCE(valid_time_end, valid_time), entity_id, value_key)
+-- (run_id, tenant_id, valid_time, series_id)
 -- This is the key guardrail that makes versioning safe.
 -- Supports overlapping time series; run_id is the update identifier.
 CREATE UNIQUE INDEX IF NOT EXISTS values_one_current_idx
-  ON values_table (run_id, tenant_id, valid_time, COALESCE(valid_time_end, valid_time), entity_id, value_key)
+  ON values_table (run_id, tenant_id, valid_time, series_id)
   WHERE is_current;
 
 -- Speeds up time-window queries across many runs
 CREATE INDEX IF NOT EXISTS values_valid_time_idx
   ON values_table (valid_time);
 
--- Speeds up fetching current values for a given (run_id, tenant_id, entity_id) over valid_time ranges
-CREATE INDEX IF NOT EXISTS values_run_tenant_entity_time_idx
-  ON values_table (run_id, tenant_id, entity_id, valid_time)
+-- Speeds up fetching current values for a given (run_id, tenant_id, series_id) over valid_time ranges
+CREATE INDEX IF NOT EXISTS values_run_tenant_series_time_idx
+  ON values_table (run_id, tenant_id, series_id, valid_time)
   WHERE is_current;
 
 -- Speeds up fetching all values for a run (run_id, tenant_id, valid_time)
 CREATE INDEX IF NOT EXISTS values_run_time_idx
   ON values_table (run_id, tenant_id, valid_time);
+
+-- Speeds up queries by series_id
+CREATE INDEX IF NOT EXISTS values_series_id_idx
+  ON values_table (series_id);
 
 -- GIN index for efficient tag-based filtering
 -- Example:
@@ -138,17 +178,20 @@ CREATE INDEX IF NOT EXISTS values_tags_gin_idx
 
 
 -- ============================================================================
--- 4) Convenience view: current_values_table
+-- 5) Convenience view: current_values_table
 -- ----------------------------------------------------------------------------
--- This view exposes ONLY the current values.
+-- This view exposes ONLY the current values with series metadata joined.
 -- Most application queries should use this view instead of values_table
 -- to avoid accidentally mixing in historical rows.
 -- ============================================================================
 
 CREATE OR REPLACE VIEW current_values_table AS
-SELECT *
-FROM values_table
-WHERE is_current = true;
+SELECT 
+  v.*,
+  s.series_key,
+  s.series_unit
+FROM values_table v
+JOIN series_table s ON v.series_id = s.series_id
+WHERE v.is_current = true;
 
 COMMIT;
-

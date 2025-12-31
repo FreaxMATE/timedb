@@ -26,6 +26,8 @@ dependencies = [
   "pandas>=2.0.0",
   "sqlalchemy>=2.0.0",
   "matplotlib>=3.7.5",
+  "pint>=0.23",               # Unit handling and conversion
+  "pint-pandas>=0.3",         # Pandas integration for Pint units
 ]
 
 # expose the CLI command 'timedb' which points to the Click group `cli` in timedb/cli.py

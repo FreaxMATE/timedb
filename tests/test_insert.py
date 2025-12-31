@@ -55,7 +55,7 @@ def test_insert_run_with_known_time(clean_db, sample_run_id, sample_tenant_id, s
             assert abs((stored_time - known_time).total_seconds()) < 1
 
 
-def test_insert_values_point_in_time(clean_db, sample_run_id, sample_tenant_id, sample_entity_id, sample_workflow_id, sample_datetime):
+def test_insert_values_point_in_time(clean_db, sample_run_id, sample_tenant_id, sample_series_id, sample_workflow_id, sample_datetime):
     """Test inserting point-in-time values."""
     with psycopg.connect(clean_db) as conn:
         # Insert run first
@@ -69,9 +69,9 @@ def test_insert_values_point_in_time(clean_db, sample_run_id, sample_tenant_id, 
         
         # Insert values
         value_rows = [
-            (sample_tenant_id, sample_datetime, sample_entity_id, "mean", 100.5),
-            (sample_tenant_id, sample_datetime + timedelta(hours=1), sample_entity_id, "mean", 101.0),
-            (sample_tenant_id, sample_datetime + timedelta(hours=2), sample_entity_id, "quantile:0.5", 102.5),
+            (sample_tenant_id, sample_datetime, sample_series_id, "mean", 100.5),
+            (sample_tenant_id, sample_datetime + timedelta(hours=1), sample_series_id, "mean", 101.0),
+            (sample_tenant_id, sample_datetime + timedelta(hours=2), sample_series_id, "quantile:0.5", 102.5),
         ]
         insert.insert_values(conn, run_id=sample_run_id, value_rows=value_rows)
         
@@ -84,7 +84,7 @@ def test_insert_values_point_in_time(clean_db, sample_run_id, sample_tenant_id, 
             assert cur.fetchone()[0] == 3
 
 
-def test_insert_values_interval(clean_db, sample_run_id, sample_tenant_id, sample_entity_id, sample_workflow_id, sample_datetime):
+def test_insert_values_interval(clean_db, sample_run_id, sample_tenant_id, sample_series_id, sample_workflow_id, sample_datetime):
     """Test inserting interval values."""
     with psycopg.connect(clean_db) as conn:
         # Insert run first
@@ -96,13 +96,13 @@ def test_insert_values_interval(clean_db, sample_run_id, sample_tenant_id, sampl
             run_start_time=sample_datetime,
         )
         
-        # Insert interval values (tenant_id, valid_time, valid_time_end, entity_id, value_key, value)
+        # Insert interval values (tenant_id, valid_time, valid_time_end, series_id, value_key, value)
         value_rows = [
             (
                 sample_tenant_id,
                 sample_datetime,
                 sample_datetime + timedelta(hours=1),
-                sample_entity_id,
+                sample_series_id,
                 "mean",
                 100.5
             ),
@@ -120,11 +120,11 @@ def test_insert_values_interval(clean_db, sample_run_id, sample_tenant_id, sampl
             assert row[0] is not None
 
 
-def test_insert_run_with_values(clean_db, sample_run_id, sample_tenant_id, sample_entity_id, sample_workflow_id, sample_datetime):
+def test_insert_run_with_values(clean_db, sample_run_id, sample_tenant_id, sample_series_id, sample_workflow_id, sample_datetime):
     """Test the convenience function that inserts run and values together."""
     value_rows = [
-        (sample_tenant_id, sample_datetime, sample_entity_id, "mean", 100.5),
-        (sample_tenant_id, sample_datetime + timedelta(hours=1), sample_entity_id, "mean", 101.0),
+        (sample_tenant_id, sample_datetime, sample_series_id, "mean", 100.5),
+        (sample_tenant_id, sample_datetime + timedelta(hours=1), sample_series_id, "mean", 101.0),
     ]
     
     insert.insert_run_with_values(
@@ -147,7 +147,7 @@ def test_insert_run_with_values(clean_db, sample_run_id, sample_tenant_id, sampl
             assert cur.fetchone()[0] == 2
 
 
-def test_insert_values_timezone_aware(clean_db, sample_run_id, sample_tenant_id, sample_entity_id, sample_workflow_id):
+def test_insert_values_timezone_aware(clean_db, sample_run_id, sample_tenant_id, sample_series_id, sample_workflow_id):
     """Test that timezone-aware datetimes are required."""
     with psycopg.connect(clean_db) as conn:
         insert.insert_run(
@@ -163,6 +163,6 @@ def test_insert_values_timezone_aware(clean_db, sample_run_id, sample_tenant_id,
             insert.insert_values(
                 conn,
                 run_id=sample_run_id,
-                value_rows=[(sample_tenant_id, datetime(2025, 1, 1, 12, 0), sample_entity_id, "mean", 100.5)],
+                value_rows=[(sample_tenant_id, datetime(2025, 1, 1, 12, 0), sample_series_id, "mean", 100.5)],
             )
 

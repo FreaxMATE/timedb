@@ -35,21 +35,21 @@ def main():
     print("\n2. Inserting mixed point-in-time and interval values...")
     run_id = uuid.uuid4()
     tenant_id = uuid.uuid4()  # In production, this would come from context
-    entity_id = uuid.uuid4()  # In production, this would come from context
+    series_id = uuid.uuid4()  # In production, this would come from context
     base_time = datetime(2025, 1, 1, 0, 0, tzinfo=timezone.utc)
     
     value_rows = [
         # Point-in-time values (valid_time_end is None)
-        (tenant_id, base_time, entity_id, "instantaneous_power", 100.0),
-        (tenant_id, base_time + timedelta(hours=1), entity_id, "instantaneous_power", 105.0),
-        (tenant_id, base_time + timedelta(hours=2), entity_id, "instantaneous_power", 110.0),
+        (tenant_id, base_time, series_id, "instantaneous_power", 100.0),
+        (tenant_id, base_time + timedelta(hours=1), series_id, "instantaneous_power", 105.0),
+        (tenant_id, base_time + timedelta(hours=2), series_id, "instantaneous_power", 110.0),
         
-        # Interval values (tenant_id, valid_time, valid_time_end, entity_id, value_key, value)
+        # Interval values (tenant_id, valid_time, valid_time_end, series_id, value_key, value)
         (
             tenant_id,
             base_time,
             base_time + timedelta(hours=1),
-            entity_id,
+            series_id,
             "energy_consumed",
             50.0  # Energy consumed over the hour
         ),
@@ -57,7 +57,7 @@ def main():
             tenant_id,
             base_time + timedelta(hours=1),
             base_time + timedelta(hours=2),
-            entity_id,
+            series_id,
             "energy_consumed",
             52.5
         ),
@@ -65,7 +65,7 @@ def main():
             tenant_id,
             base_time + timedelta(hours=2),
             base_time + timedelta(hours=3),
-            entity_id,
+            series_id,
             "energy_consumed",
             55.0
         ),

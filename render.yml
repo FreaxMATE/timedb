@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: timedb-api
+    env: python
+    region: oregon  # Choose your preferred region
+    plan: free  # or starter/standard based on your needs
+    buildCommand: pip install -e .
+    startCommand: uvicorn timedb.api:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11
+      - key: TIMEDB_DSN
+        sync: false  # Set this in Render dashboard as a secret
+      - key: DATABASE_URL
+        sync: false  # Alternative to TIMEDB_DSN

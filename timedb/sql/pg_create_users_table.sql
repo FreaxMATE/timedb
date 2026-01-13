@@ -67,6 +67,8 @@ END;
 $$ LANGUAGE plpgsql;
 
 -- Trigger to automatically update updated_at on row updates
+-- Drop first to make idempotent (PostgreSQL doesn't support CREATE TRIGGER IF NOT EXISTS)
+DROP TRIGGER IF EXISTS users_updated_at_trigger ON users_table;
 CREATE TRIGGER users_updated_at_trigger
   BEFORE UPDATE ON users_table
   FOR EACH ROW

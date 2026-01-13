@@ -10,7 +10,7 @@ from typing import Optional, List, Dict, Any
 from fastapi import FastAPI, HTTPException, Query, Depends
 from fastapi.responses import Response
 from pydantic import BaseModel, Field, ConfigDict
-from dotenv import load_dotenv, find_dotenv
+from dotenv import load_dotenv
 import psycopg
 from psycopg import errors as psycopg_errors
 from psycopg.rows import dict_row
@@ -19,7 +19,9 @@ import pandas as pd
 from . import db
 from .auth import get_current_user, CurrentUser
 
-load_dotenv(find_dotenv())
+# Load .env file but DO NOT override existing environment variables
+# This allows users to set TIMEDB_DSN/DATABASE_URL before importing this module
+load_dotenv(override=False)
 
 # Database connection string from environment
 def get_dsn() -> str:

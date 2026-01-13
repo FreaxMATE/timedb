@@ -28,6 +28,8 @@ dependencies = [
   "matplotlib>=3.7.5",
   "pint>=0.23",               # Unit handling and conversion
   "pint-pandas>=0.3",         # Pandas integration for Pint units
+  "ipykernel>=6.31.0",
+  "requests>=2.32.5",
 ]
 
 # expose the CLI command 'timedb' which points to the Typer app in timedb/cli.py

@@ -79,7 +79,7 @@ def get_or_create_series(
     """
     with conn.cursor() as cur:
         if series_id is not None:
-            # Verify the series exists and matches
+            # Check if the series exists
             cur.execute(
                 """
                 SELECT series_key, series_unit
@@ -90,8 +90,17 @@ def get_or_create_series(
             )
             row = cur.fetchone()
             if row is None:
-                raise ValueError(f"Series with series_id {series_id} does not exist")
+                # Series doesn't exist - create it with the provided series_id
+                cur.execute(
+                    """
+                    INSERT INTO series_table (series_id, series_key, series_unit)
+                    VALUES (%s, %s, %s)
+                    """,
+                    (series_id, series_key, series_unit)
+                )
+                return series_id
             
+            # Series exists - verify it matches
             existing_key, existing_unit = row
             if existing_key != series_key or existing_unit != series_unit:
                 raise ValueError(

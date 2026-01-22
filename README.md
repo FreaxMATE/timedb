@@ -108,9 +108,18 @@ Schema columns provides additional attributes to the values according to:
 ## Roadmap
 - [x] Decouple the knowledge time from the run_time
 - [ ] Python SDK that allows time series data manipulations, reads and writes
-- [ ] RESTful API layer that serves data to users
+- [ x ] RESTful API layer that serves data to users
 - [ ] Handle different time zones in the API layer while always storing in UTC in the database. 
 - [ ] Support for postgres time intervals (tsrange/tstzrange)
 - [ ] Built in data retention, TTL, and archiving
 - [ ] Support for subscribing to database updates through the API 
-- [ ] Unit handling (e.g. MW, kW)
+- [ x ] Unit handling (e.g. MW, kW)
+- [ ] Xarray integration for multidimensional time series. 
+- [ ] Polars integration for lazy computations. 
+ - [ ] Parquet file integration
+ - [ ] Real-Time Subscriptions through websocket subscription
+ - [ ] Store time series with geographic coordinates. Query by spatial region (e.g., "all temperature sensors in this polygon")
+ - [ ] Automatic alignment and interpolation of different time series resolutions. 
+ - [ ] Symbolic time series + serialization
+
+

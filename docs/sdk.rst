@@ -671,9 +671,7 @@ Setting Up Authentication
    )
 
 Tenant Isolation
-~~~~~~~~~~~~~~~~
-
-Each user's API key is tied to a ``tenant_id``. Users can only:
+~~~~~~~~~~~~~~~~Each user's API key is tied to a ``tenant_id``. Users can only:
 - Read data for their own tenant
 - Write data for their own tenant
 - Update records for their own tenant

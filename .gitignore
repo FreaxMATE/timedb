@@ -62,9 +62,14 @@ Thumbs.db
 # Personal tooling
 # =========================
 .pm/
+CLAUDE.md
 
 # =========================
 # Sphinx build artifacts
 # =========================
 docs/_build/
 docs/notebooks
+
+testing_scripts/
+loc_graph.py
+architecture/

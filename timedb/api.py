@@ -1,92 +1,163 @@
 """
-FastAPI application for timedb - MVP version
+FastAPI application for timedb - REST API
+
 Provides REST API endpoints for time series database operations.
+
+The API exposes endpoints for:
+- Creating and managing time series (POST /series, GET /series)
+- Inserting time series data (POST /values)
+- Reading/querying time series data (GET /values)
+- Updating existing records (PUT /values)
+- Discovering labels and counts (GET /series/labels, GET /series/count)
+
+Interactive documentation:
+    - Swagger UI: /docs
+    - ReDoc: /redoc
+
+Environment:
+    Requires TIMEDB_DSN or DATABASE_URL environment variable
+    for database connection.
 """
+import json
 import os
-import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
 
-from fastapi import FastAPI, HTTPException, Query, Depends
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import Response
-from pydantic import BaseModel, Field, ConfigDict
-from dotenv import load_dotenv
-import psycopg
-from psycopg import errors as psycopg_errors
-from psycopg.rows import dict_row
+from pydantic import BaseModel, Field
 import pandas as pd
 
-from . import db
-from .auth import get_current_user, CurrentUser
+from .sdk import TimeDataClient
 
-# Load .env file but DO NOT override existing environment variables
-# This allows users to set TIMEDB_DSN/DATABASE_URL before importing this module
-load_dotenv(override=False)
 
 # Database connection string from environment
 def get_dsn() -> str:
     """Get database connection string from environment variables."""
     dsn = os.environ.get("TIMEDB_DSN") or os.environ.get("DATABASE_URL")
     if not dsn:
-        raise HTTPException(
-            status_code=500,
-            detail="Database connection not configured. Set TIMEDB_DSN or DATABASE_URL environment variable."
+        raise RuntimeError(
+            "Database connection not configured. Set TIMEDB_DSN or DATABASE_URL environment variable."
         )
     return dsn
 
 
-# Pydantic models for request/response
-class ValueRow(BaseModel):
-    """A single value row for insertion."""
+# =============================================================================
+# Lifespan: SDK client initialization
+# =============================================================================
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Initialize TimeDataClient with connection pool for the API's lifetime."""
+    app.state.td = TimeDataClient()
+    yield
+    app.state.td.close()
+
+
+def _get_client(request: Request) -> TimeDataClient:
+    """Get the SDK client from app state."""
+    return request.app.state.td
+
+
+# =============================================================================
+# Shared helpers
+# =============================================================================
+
+def _ensure_tz(dt_val: Optional[datetime]) -> Optional[datetime]:
+    """Ensure a datetime is timezone-aware (default to UTC if naive)."""
+    if dt_val is not None and dt_val.tzinfo is None:
+        return dt_val.replace(tzinfo=timezone.utc)
+    return dt_val
+
+
+def _parse_labels(labels_json: Optional[str]) -> Optional[Dict[str, str]]:
+    """Parse a JSON string into a labels dict."""
+    if labels_json is None:
+        return None
+    try:
+        parsed = json.loads(labels_json)
+        if not isinstance(parsed, dict):
+            raise ValueError
+        return parsed
+    except (json.JSONDecodeError, ValueError):
+        raise HTTPException(status_code=400, detail="labels must be a valid JSON object (e.g. '{\"site\":\"Gotland\"}')")
+
+# =============================================================================
+# Pydantic models
+# =============================================================================
+
+class DataPoint(BaseModel):
+    """A single data point for insertion."""
     valid_time: datetime
-    value_key: str
     value: Optional[float] = None
-    valid_time_end: Optional[datetime] = None  # For interval values
-    series_id: Optional[str] = None  # Optional series_id. If not provided, a new series will be created.
-
-    model_config = ConfigDict(json_encoders={datetime: lambda v: v.isoformat()})
+    valid_time_end: Optional[datetime] = None
 
 
-class CreateRunRequest(BaseModel):
-    """Request to create a run with values."""
-    workflow_id: Optional[str] = Field(default="api-workflow", description="Workflow identifier (defaults to 'api-workflow')")
-    run_start_time: datetime
-    run_finish_time: Optional[datetime] = None
-    known_time: Optional[datetime] = None  # Time of knowledge - defaults to inserted_at (now()) if not provided
-    tenant_id: Optional[str] = None  # Tenant UUID (defaults to zeros UUID for single-tenant)
-    run_params: Optional[Dict[str, Any]] = None
-    value_rows: List[ValueRow] = Field(default_factory=list)
-    series_descriptions: Optional[Dict[str, str]] = Field(None, description="Optional dict mapping value_key to description. Used when creating new series.")
+class InsertRequest(BaseModel):
+    """Request to insert time series data.
 
-    model_config = ConfigDict(json_encoders={datetime: lambda v: v.isoformat()})
+    Specify the target series by name+labels OR by series_id.
+    The series must already exist (use POST /series to create it first).
+
+    Attributes:
+        name: Series name (used with labels to resolve series_id)
+        labels: Labels for series resolution (e.g., {"site": "Gotland"})
+        series_id: Direct series_id (alternative to name+labels)
+        workflow_id: Workflow identifier (defaults to 'api-workflow')
+        known_time: Time of knowledge (defaults to now(), important for overlapping series)
+        batch_params: Custom parameters to store with the batch
+        data: Array of data points to insert
+    """
+    name: Optional[str] = Field(None, description="Series name (resolve by name+labels)")
+    labels: Dict[str, str] = Field(default_factory=dict, description="Labels for series resolution")
+    series_id: Optional[int] = Field(None, description="Direct series_id (alternative to name+labels)")
+    workflow_id: str = Field(default="api-workflow", description="Workflow identifier")
+    known_time: Optional[datetime] = Field(None, description="Time of knowledge (defaults to now())")
+    batch_params: Optional[Dict[str, Any]] = Field(None, description="Custom batch parameters")
+    data: List[DataPoint] = Field(default_factory=list, description="Data points to insert")
 
 
-class CreateRunResponse(BaseModel):
-    """Response after creating a run."""
-    run_id: str
-    message: str
-    series_ids: Dict[str, str]  # Maps series_key to series_id (UUID as string)
+class InsertResponse(BaseModel):
+    """Response after inserting data."""
+    batch_id: Optional[int] = Field(None, description="Batch ID (None for flat series)")
+    series_id: int
+    rows_inserted: int
 
 
 class RecordUpdateRequest(BaseModel):
     """Request to update a record.
-    
-    For value, annotation, and tags:
+
+    Supports both flat and overlapping series with different update semantics:
+
+    **Flat series**: In-place update by (series_id, valid_time).
+    **Overlapping series**: Creates new version with known_time=now().
+
+    Identify the series by series_id OR by name(+labels).
+
+    For overlapping series, three lookup methods (all optional):
+    - batch_id + valid_time: latest version in that batch
+    - known_time + valid_time: exact version lookup
+    - just valid_time: latest version overall
+
+    For value, annotation, tags, and changed_by:
     - Omit the field to leave it unchanged
     - Set to null to explicitly clear it
     - Set to a value to update it
-    
-    Note: changed_by is automatically set from the authenticated user's email.
     """
-    run_id: str
-    tenant_id: str
     valid_time: datetime
-    series_id: str
-    value: Optional[float] = Field(default=None, description="Omit to leave unchanged, null to clear, or provide a value")
-    annotation: Optional[str] = Field(default=None, description="Omit to leave unchanged, null to clear, or provide a value")
-    tags: Optional[List[str]] = Field(default=None, description="Omit to leave unchanged, null or [] to clear, or provide tags")
-
-    model_config = ConfigDict(json_encoders={datetime: lambda v: v.isoformat()})
+    # Series identification: provide series_id OR name(+labels)
+    series_id: Optional[int] = Field(default=None, description="Series ID (alternative to name+labels)")
+    name: Optional[str] = Field(default=None, description="Series name (alternative to series_id)")
+    labels: Dict[str, str] = Field(default_factory=dict, description="Labels for series resolution")
+    # Overlapping version lookup (all optional)
+    batch_id: Optional[int] = Field(default=None, description="For overlapping: target specific batch")
+    known_time: Optional[datetime] = Field(default=None, description="For overlapping: target specific version")
+    # Tri-state update fields
+    value: Optional[float] = Field(default=None, description="Omit to leave unchanged, null to clear")
+    annotation: Optional[str] = Field(default=None, description="Omit to leave unchanged, null to clear")
+    tags: Optional[List[str]] = Field(default=None, description="Omit to leave unchanged, null or [] to clear")
+    changed_by: Optional[str] = Field(default=None, description="Who made the change")
 
 
 class UpdateRecordsRequest(BaseModel):
@@ -97,381 +168,289 @@ class UpdateRecordsRequest(BaseModel):
 class UpdateRecordsResponse(BaseModel):
     """Response after updating records."""
     updated: List[Dict[str, Any]]
-    skipped_no_ops: List[Dict[str, Any]]
-
-
-class ErrorResponse(BaseModel):
-    """Error response model."""
-    detail: str
 
 
 class CreateSeriesRequest(BaseModel):
-    """Request to create a new time series."""
-    name: str = Field(..., description="Human-readable identifier for the series (e.g., 'wind_power_forecast')")
-    description: Optional[str] = Field(None, description="Optional description of the series")
-    unit: str = Field(default="dimensionless", description="Canonical unit for the series (e.g., 'MW', 'kW', 'MWh', 'dimensionless')")
+    """Request to create a new time series.
+
+    Series identity is determined by (name, labels). Two series with the same name
+    but different labels are different series.
+    """
+    name: str = Field(..., description="Series name (e.g., 'wind_power_forecast')")
+    description: Optional[str] = Field(None, description="Description of the series")
+    unit: str = Field(default="dimensionless", description="Canonical unit (e.g., 'MW', 'kW', 'MWh')")
+    labels: Dict[str, str] = Field(default_factory=dict, description="Labels (e.g., {'site': 'Gotland'})")
+    overlapping: bool = Field(default=False, description="True for versioned/revised data")
+    retention: str = Field(default="medium", description="'short', 'medium', or 'long' retention")
 
 
 class CreateSeriesResponse(BaseModel):
     """Response after creating a series."""
-    series_id: str
+    series_id: int
     message: str
 
 
 class SeriesInfo(BaseModel):
     """Information about a time series."""
-    series_key: str
+    series_id: int
+    name: str
     description: Optional[str] = None
     unit: str
+    labels: Dict[str, str] = Field(default_factory=dict)
+    overlapping: bool = False
+    retention: str = "medium"
 
 
+# =============================================================================
 # FastAPI app
+# =============================================================================
+
 app = FastAPI(
     title="TimeDB API",
     description="REST API for time series database operations",
-    version="0.1.1"
+    version="0.2.0",
+    lifespan=lifespan,
 )
 
+
+# =============================================================================
+# Endpoints
+# =============================================================================
 
 @app.get("/")
 async def root():
     """Root endpoint with API information."""
-    import json
     data = {
         "name": "TimeDB API",
-        "version": "0.1.1",
+        "version": "0.2.0",
         "description": "REST API for reading and writing time series data",
         "endpoints": {
+            "insert_values": "POST /values - Insert time series data",
             "read_values": "GET /values - Read time series values",
-            "upload_timeseries": "POST /upload - Upload time series data (create a new run with values)",
+            "update_records": "PUT /values - Update existing records",
             "create_series": "POST /series - Create a new time series",
-            "list_timeseries": "GET /list_timeseries - List all time series (series_id -> series_key mapping)",
-            "update_records": "PUT /values - Update existing time series records",
+            "list_series": "GET /series - List/filter time series",
+            "series_labels": "GET /series/labels - List unique label values",
+            "series_count": "GET /series/count - Count matching series",
         },
-        "authentication": {
-            "method": "API Key",
-            "header": "X-API-Key",
-            "note": "Authentication is optional. If users_table exists, endpoints require authentication. Users can only access data for their own tenant_id."
-        },
-        "admin_note": "Schema creation/deletion and user management must be done through CLI or SDK, not through the API."
+        "admin_note": "Schema creation/deletion must be done through CLI or SDK, not through the API.",
     }
-    # Manually serialize to avoid FastAPI's jsonable_encoder recursion issue
     json_str = json.dumps(data)
-    return Response(content=json_str.encode('utf-8'), media_type="application/json")
+    return Response(content=json_str.encode("utf-8"), media_type="application/json")
+
+
+@app.post("/values", response_model=InsertResponse)
+async def insert_values(request_body: InsertRequest, request: Request):
+    """
+    Insert time series data.
+
+    Specify the target series by name+labels OR by series_id.
+    The series must already exist (use POST /series to create it first).
+
+    Routing is automatic:
+    - Flat series: inserted directly (no batch created, batch_id=null in response)
+    - Overlapping series: a batch is created with known_time tracking
+    """
+    try:
+        if request_body.series_id is None and request_body.name is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Provide either 'series_id' or 'name' (+labels) to identify the target series.",
+            )
+
+        if not request_body.data:
+            raise HTTPException(status_code=400, detail="'data' must contain at least one data point.")
+
+        known_time = _ensure_tz(request_body.known_time)
+
+        # Build SeriesCollection via SDK
+        td = _get_client(request)
+        if request_body.series_id is not None:
+            collection = td.series(series_id=request_body.series_id)
+        else:
+            collection = td.series(name=request_body.name)
+            if request_body.labels:
+                collection = collection.where(**request_body.labels)
+
+        # Build DataFrame from request data
+        rows: List[Dict[str, Any]] = []
+        for dp in request_body.data:
+            valid_time = _ensure_tz(dp.valid_time)
+            row: Dict[str, Any] = {"valid_time": valid_time, "value": dp.value}
+            if dp.valid_time_end is not None:
+                row["valid_time_end"] = _ensure_tz(dp.valid_time_end)
+            rows.append(row)
+
+        df = pd.DataFrame(rows)
+        df["valid_time"] = pd.to_datetime(df["valid_time"], utc=True)
+        if "valid_time_end" in df.columns:
+            df["valid_time_end"] = pd.to_datetime(df["valid_time_end"], utc=True)
+
+        # Insert via SDK
+        result = collection.insert(
+            df,
+            known_time=known_time,
+            workflow_id=request_body.workflow_id,
+            batch_params=request_body.batch_params,
+        )
+
+        return InsertResponse(
+            batch_id=result.batch_id,
+            series_id=result.series_id,
+            rows_inserted=len(request_body.data),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error inserting values: {str(e)}")
 
 
 @app.get("/values", response_model=Dict[str, Any])
 async def read_values(
+    request: Request,
+    name: Optional[str] = Query(None, description="Filter by series name"),
+    labels: Optional[str] = Query(None, description="Filter by labels (JSON, e.g. '{\"site\":\"Gotland\"}')"),
+    series_id: Optional[int] = Query(None, description="Filter by series_id"),
     start_valid: Optional[datetime] = Query(None, description="Start of valid time range (ISO format)"),
     end_valid: Optional[datetime] = Query(None, description="End of valid time range (ISO format)"),
     start_known: Optional[datetime] = Query(None, description="Start of known_time range (ISO format)"),
     end_known: Optional[datetime] = Query(None, description="End of known_time range (ISO format)"),
-    mode: str = Query("flat", description="Query mode: 'flat' or 'overlapping'"),
-    all_versions: bool = Query(False, description="Include all versions (not just current)"),
-    current_user: Optional[CurrentUser] = Depends(get_current_user),
+    versions: bool = Query(False, description="If true, return all overlapping revisions (for backtesting)"),
 ):
     """
-    Read time series values from the database.
-    
-    Returns values filtered by valid_time and/or known_time ranges.
-    All datetime parameters should be in ISO format (e.g., 2025-01-01T00:00:00Z).
-    
-    Modes:
-    - "flat": Returns (valid_time, value_key, value) with latest known_time per valid_time
-    - "overlapping": Returns (known_time, valid_time, value_key, value) - all rows with known_time
-    
-    all_versions: If True, includes all versions (both is_current=true and false). If False, only current values.
+    Read time series values.
+
+    Filter by series name, labels, and/or series_id.
+    Time range filtering via start_valid/end_valid and start_known/end_known.
+
+    By default returns the latest value per (valid_time, series_id).
+    Set versions=true to return all forecast revisions with their known_time.
     """
     try:
-        dsn = get_dsn()
-        
-        # Validate mode parameter
-        if mode not in ["flat", "overlapping"]:
-            raise HTTPException(status_code=400, detail=f"Invalid mode: {mode}. Must be 'flat' or 'overlapping'")
-        
-        # Convert timezone-naive datetimes to UTC if needed
-        if start_valid and start_valid.tzinfo is None:
-            start_valid = start_valid.replace(tzinfo=timezone.utc)
-        if end_valid and end_valid.tzinfo is None:
-            end_valid = end_valid.replace(tzinfo=timezone.utc)
-        if start_known and start_known.tzinfo is None:
-            start_known = start_known.replace(tzinfo=timezone.utc)
-        if end_known and end_known.tzinfo is None:
-            end_known = end_known.replace(tzinfo=timezone.utc)
-        
-        # Use tenant_id from authenticated user if available
-        tenant_id = None
-        if current_user:
-            tenant_id = uuid.UUID(current_user.tenant_id)
-        
-        if mode == "flat":
-            df = db.read.read_values_flat(
-                dsn,
-                tenant_id=tenant_id,
-                start_valid=start_valid,
-                end_valid=end_valid,
-                start_known=start_known,
-                end_known=end_known,
-                all_versions=all_versions,
-            )
-        elif mode == "overlapping":
-            df = db.read.read_values_overlapping(
-                dsn,
-                tenant_id=tenant_id,
-                start_valid=start_valid,
-                end_valid=end_valid,
-                start_known=start_known,
-                end_known=end_known,
-                all_versions=all_versions,
-            )
-        else:
-            raise ValueError(f"Invalid mode: {mode}. Must be 'flat' or 'overlapping'")
-        
-        # Convert DataFrame to JSON-serializable format
+        label_filters = _parse_labels(labels)
+        start_valid = _ensure_tz(start_valid)
+        end_valid = _ensure_tz(end_valid)
+        start_known = _ensure_tz(start_known)
+        end_known = _ensure_tz(end_known)
+
+        # Build SeriesCollection via SDK
+        td = _get_client(request)
+        collection = td.series(name=name, series_id=series_id)
+        if label_filters:
+            collection = collection.where(**label_filters)
+
+        # Read via SDK (handles all routing logic internally)
+        df = collection.read(
+            start_valid=start_valid,
+            end_valid=end_valid,
+            start_known=start_known,
+            end_known=end_known,
+            versions=versions,
+        )
+
+        if df.empty:
+            return {"count": 0, "data": []}
+
+        # Convert DataFrame to JSON-serializable records
         df_reset = df.reset_index()
         records = df_reset.to_dict(orient="records")
-        
-        # Convert datetime objects to ISO format strings
+
         for record in records:
             for key, value in record.items():
-                if isinstance(value, pd.Timestamp):
-                    record[key] = value.isoformat()
-                elif isinstance(value, datetime):
+                if isinstance(value, (pd.Timestamp, datetime)):
                     record[key] = value.isoformat()
                 elif pd.isna(value):
                     record[key] = None
-        
-        return {
-            "count": len(records),
-            "data": records
-        }
+
+        return {"count": len(records), "data": records}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error reading values: {str(e)}")
 
 
-@app.post("/upload", response_model=CreateRunResponse)
-async def upload_timeseries(
-    request: CreateRunRequest,
-    current_user: Optional[CurrentUser] = Depends(get_current_user),
-):
-    """
-    Upload time series data (create a new run with associated values).
-    
-    This endpoint creates a run entry and inserts value rows. It returns
-    the series_ids for all series that were uploaded, which can be used
-    in subsequent API calls to query and update the data.
-    """
-    try:
-        dsn = get_dsn()
-        run_id = uuid.uuid4()
-        
-        # Ensure timezone-aware datetimes
-        if request.run_start_time.tzinfo is None:
-            run_start_time = request.run_start_time.replace(tzinfo=timezone.utc)
-        else:
-            run_start_time = request.run_start_time
-            
-        if request.run_finish_time is not None:
-            if request.run_finish_time.tzinfo is None:
-                run_finish_time = request.run_finish_time.replace(tzinfo=timezone.utc)
-            else:
-                run_finish_time = request.run_finish_time
-        else:
-            run_finish_time = None
-        
-        if request.known_time is not None:
-            if request.known_time.tzinfo is None:
-                known_time = request.known_time.replace(tzinfo=timezone.utc)
-            else:
-                known_time = request.known_time
-        else:
-            known_time = None  # Will default to run_start_time in insert_run
-        
-        # Use tenant_id from authenticated user, or from request if no authentication
-        if current_user:
-            # User is authenticated - use their tenant_id (cannot override)
-            tenant_id = uuid.UUID(current_user.tenant_id)
-        else:
-            # No authentication - use tenant_id from request or default
-            if request.tenant_id:
-                try:
-                    tenant_id = uuid.UUID(request.tenant_id)
-                except ValueError:
-                    raise HTTPException(status_code=400, detail=f"Invalid tenant_id format: {request.tenant_id}")
-            else:
-                # Default to zeros UUID for single-tenant installations
-                tenant_id = uuid.UUID("00000000-0000-0000-0000-000000000000")
-        
-        # workflow_id defaults to "api-workflow" via Field(default="api-workflow")
-        workflow_id = request.workflow_id or "api-workflow"
-        
-        # Get or create series for each unique value_key
-        # Convert value_rows to the format expected by insert_run_with_values:
-        # - (tenant_id, valid_time, series_id, value) for point-in-time
-        # - (tenant_id, valid_time, valid_time_end, series_id, value) for interval
-        import psycopg
-        with psycopg.connect(dsn) as conn:
-            series_mapping = {}  # Maps value_key to series_id (UUID)
-            series_ids_dict = {}  # Maps value_key to series_id (string) for response
-            series_descriptions = request.series_descriptions or {}
-            
-            for row in request.value_rows:
-                if row.value_key not in series_mapping:
-                    # Check if series_id is provided in the row
-                    if row.series_id:
-                        try:
-                            provided_series_id = uuid.UUID(row.series_id)
-                            # Verify the series exists and use it
-                            series_id = db.series.get_or_create_series(
-                                conn,
-                                series_key=row.value_key,
-                                series_unit="dimensionless",  # API doesn't support units yet
-                                series_id=provided_series_id,  # Verify this series_id exists
-                            )
-                        except ValueError as e:
-                            raise HTTPException(status_code=400, detail=f"Invalid series_id format: {e}")
-                    else:
-                        # Create a new series using create_series
-                        description = series_descriptions.get(row.value_key)
-                        series_id = db.series.create_series(
-                            conn,
-                            name=row.value_key,
-                            description=description,
-                            unit="dimensionless",  # API doesn't support units yet
-                        )
-                    series_mapping[row.value_key] = series_id
-                    series_ids_dict[row.value_key] = str(series_id)
-        
-        # Convert value_rows to the correct format
-        value_rows = []
-        for row in request.value_rows:
-            series_id = series_mapping[row.value_key]
-            if row.valid_time_end is not None:
-                # Interval value: (tenant_id, valid_time, valid_time_end, series_id, value)
-                value_rows.append((tenant_id, row.valid_time, row.valid_time_end, series_id, row.value))
-            else:
-                # Point-in-time value: (tenant_id, valid_time, series_id, value)
-                value_rows.append((tenant_id, row.valid_time, series_id, row.value))
-        
-        db.insert.insert_run_with_values(
-            conninfo=dsn,
-            run_id=run_id,
-            tenant_id=tenant_id,
-            workflow_id=workflow_id,
-            run_start_time=run_start_time,
-            run_finish_time=run_finish_time,
-            known_time=known_time,
-            value_rows=value_rows,
-            run_params=request.run_params,
-            changed_by=current_user.email if current_user else None,
-        )
-        
-        return CreateRunResponse(
-            run_id=str(run_id),
-            message="Run created successfully",
-            series_ids=series_ids_dict
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error creating run: {str(e)}")
-
-
 @app.put("/values", response_model=UpdateRecordsResponse)
-async def update_records(
-    request: UpdateRecordsRequest,
-    current_user: Optional[CurrentUser] = Depends(get_current_user),
-):
+async def update_records(request_body: UpdateRecordsRequest, request: Request):
     """
-    Update one or more records in the values table.
-    
-    This endpoint supports tri-state updates:
+    Update one or more records (flat or overlapping series).
+
+    Identify the series by series_id OR by name(+labels).
+
+    **Flat series**: In-place update by (series_id, valid_time).
+    **Overlapping series**: Creates new version. Three lookup methods:
+    - batch_id + valid_time: latest version in that batch
+    - known_time + valid_time: exact version lookup
+    - just valid_time: latest version overall
+
+    Tri-state updates:
     - Omit a field to leave it unchanged
     - Set to None to explicitly clear the field
     - Set to a value to update it
     """
     try:
-        dsn = get_dsn()
-        
-        # Convert request updates to RecordUpdate objects
-        updates = []
-        for req_update in request.updates:
-            # Parse UUIDs
-            try:
-                run_id_uuid = uuid.UUID(req_update.run_id)
-                tenant_id_uuid = uuid.UUID(req_update.tenant_id)
-                series_id_uuid = uuid.UUID(req_update.series_id)
-            except ValueError as e:
-                raise HTTPException(status_code=400, detail=f"Invalid UUID format: {e}")
-            
-            # Ensure timezone-aware datetime
-            valid_time = req_update.valid_time
-            if valid_time.tzinfo is None:
-                valid_time = valid_time.replace(tzinfo=timezone.utc)
-            
-            # Use model_dump to check which fields were actually provided
-            # exclude_unset=True gives us only fields that were explicitly set
+        if not request_body.updates:
+            raise HTTPException(status_code=400, detail="'updates' must contain at least one update.")
+
+        td = _get_client(request)
+
+        # Extract series identification from first update
+        first_update = request_body.updates[0]
+        if first_update.series_id is not None:
+            collection = td.series(series_id=first_update.series_id)
+        elif first_update.name is not None:
+            collection = td.series(name=first_update.name)
+            if first_update.labels:
+                collection = collection.where(**first_update.labels)
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="First update must include 'series_id' or 'name' (+labels) to identify the series.",
+            )
+
+        # Convert API update format to SDK format
+        sdk_updates: List[Dict[str, Any]] = []
+        for req_update in request_body.updates:
+            valid_time = _ensure_tz(req_update.valid_time)
+            known_time = _ensure_tz(req_update.known_time)
             provided_fields = req_update.model_dump(exclude_unset=True)
-            
-            # Build update dict - only include fields that were provided
-            update_dict = {
-                "run_id": run_id_uuid,
-                "tenant_id": tenant_id_uuid,
-                "valid_time": valid_time,
-                "series_id": series_id_uuid,
-            }
-            
-            # Add optional fields only if provided
+
+            update_dict: Dict[str, Any] = {"valid_time": valid_time}
+
+            if req_update.batch_id is not None:
+                update_dict["batch_id"] = req_update.batch_id
+            if known_time is not None:
+                update_dict["known_time"] = known_time
+
+            # Tri-state field handling
             if "value" in provided_fields:
-                update_dict["value"] = req_update.value  # Can be None (explicit clear) or a float
-                
+                update_dict["value"] = req_update.value
             if "annotation" in provided_fields:
-                update_dict["annotation"] = req_update.annotation  # Can be None (explicit clear) or a string
-                
+                update_dict["annotation"] = req_update.annotation
             if "tags" in provided_fields:
-                update_dict["tags"] = req_update.tags  # Can be None or [] (explicit clear) or a list
-            
-            # Automatically set changed_by from authenticated user's email if available
-            # User cannot override this for security/audit purposes
-            if current_user:
-                update_dict["changed_by"] = current_user.email
-                # Ensure user can only update records for their own tenant_id
-                if tenant_id_uuid != uuid.UUID(current_user.tenant_id):
-                    raise HTTPException(
-                        status_code=403,
-                        detail=f"Cannot update records for tenant_id {req_update.tenant_id}. You can only update records for your own tenant_id ({current_user.tenant_id})."
-                    )
-            
-            updates.append(update_dict)
-        
-        # Execute updates
-        with psycopg.connect(dsn) as conn:
-            outcome = db.update.update_records(conn, updates=updates)
-        
-        # Convert response to JSON-serializable format
-        updated = [
-            {
-                "run_id": str(r["run_id"]),
-                "tenant_id": str(r["tenant_id"]),
-                "valid_time": r["valid_time"].isoformat(),
-                "series_id": str(r["series_id"]),
-                "value_id": r["value_id"]
-            }
-            for r in outcome["updated"]
-        ]
-        
-        skipped = [
-            {
-                "run_id": str(k["run_id"]),
-                "tenant_id": str(k["tenant_id"]),
-                "valid_time": k["valid_time"].isoformat(),
-                "series_id": str(k["series_id"])
-            }
-            for k in outcome["skipped_no_ops"]
-        ]
-        
-        return UpdateRecordsResponse(
-            updated=updated,
-            skipped_no_ops=skipped
-        )
+                update_dict["tags"] = req_update.tags
+            if "changed_by" in provided_fields:
+                update_dict["changed_by"] = req_update.changed_by
+
+            sdk_updates.append(update_dict)
+
+        # Update via SDK
+        updated_records = collection.update_records(sdk_updates)
+
+        # Serialize datetime fields for JSON response
+        serialized = []
+        for r in updated_records:
+            item = {}
+            for k, v in r.items():
+                item[k] = v.isoformat() if isinstance(v, datetime) else v
+            serialized.append(item)
+
+        return UpdateRecordsResponse(updated=serialized)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:
@@ -479,98 +458,137 @@ async def update_records(
 
 
 @app.post("/series", response_model=CreateSeriesResponse)
-async def create_series(
-    request: CreateSeriesRequest,
-    current_user: Optional[CurrentUser] = Depends(get_current_user),
-):
+async def create_series(request_body: CreateSeriesRequest, request: Request):
     """
     Create a new time series.
-    
-    This endpoint creates a new series with the specified name, description, and unit.
-    A new series_id is generated and returned, which can be used in subsequent API calls.
+
+    Series identity is determined by (name, labels). Two series with the same name
+    but different labels are different series.
     """
     try:
-        dsn = get_dsn()
-        import psycopg
-        
-        with psycopg.connect(dsn) as conn:
-            series_id = db.series.create_series(
-                conn,
-                name=request.name,
-                description=request.description,
-                unit=request.unit,
-            )
-        
-        return CreateSeriesResponse(
-            series_id=str(series_id),
-            message="Series created successfully"
+        td = _get_client(request)
+        series_id = td.create_series(
+            name=request_body.name,
+            description=request_body.description,
+            unit=request_body.unit,
+            labels=request_body.labels,
+            overlapping=request_body.overlapping,
+            retention=request_body.retention,
         )
+
+        return CreateSeriesResponse(series_id=series_id, message="Series created successfully")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error creating series: {str(e)}")
 
 
-@app.get("/list_timeseries", response_model=Dict[str, SeriesInfo])
-async def list_timeseries(
-    current_user: Optional[CurrentUser] = Depends(get_current_user),
+@app.get("/series", response_model=List[SeriesInfo])
+async def list_series(
+    request: Request,
+    name: Optional[str] = Query(None, description="Filter by series name"),
+    labels: Optional[str] = Query(None, description="Filter by labels (JSON, e.g. '{\"site\":\"Gotland\"}')"),
+    unit: Optional[str] = Query(None, description="Filter by unit"),
+    series_id: Optional[int] = Query(None, description="Filter by series_id"),
 ):
     """
-    List all time series available in the database.
-    
-    Returns a dictionary mapping series_id (as string) to series information
-    including series_key, description, and unit.
-    This can be used in subsequent API calls to query and update data.
-    
-    If authentication is enabled, only returns series for the user's tenant_id.
+    List time series, optionally filtered by name, labels, unit, or series_id.
+
+    Returns a list of series with their metadata.
     """
     try:
-        dsn = get_dsn()
-        import psycopg
-        
-        with psycopg.connect(dsn) as conn:
-            # Filter by tenant_id if user is authenticated
-            if current_user:
-                tenant_id = uuid.UUID(current_user.tenant_id)
-                # Get series_ids that have values for this tenant
-                with conn.cursor() as cur:
-                    cur.execute(
-                        """
-                        SELECT DISTINCT v.series_id, s.series_key, s.description, s.series_unit
-                        FROM values_table v
-                        JOIN series_table s ON v.series_id = s.series_id
-                        WHERE v.tenant_id = %s
-                        ORDER BY s.series_key
-                        """,
-                        (tenant_id,)
-                    )
-                    rows = cur.fetchall()
-            else:
-                # No authentication - return all series
-                with conn.cursor() as cur:
-                    cur.execute(
-                        """
-                        SELECT series_id, series_key, description, series_unit
-                        FROM series_table
-                        ORDER BY series_key
-                        """
-                    )
-                    rows = cur.fetchall()
-            
-            # Build dictionary: series_id (string) -> SeriesInfo
-            result = {
-                str(series_id): SeriesInfo(
-                    series_key=series_key,
-                    description=description,
-                    unit=series_unit
-                )
-                for series_id, series_key, description, series_unit in rows
-            }
-            return result
-            
+        label_filters = _parse_labels(labels)
+
+        td = _get_client(request)
+        collection = td.series(name=name, unit=unit, series_id=series_id)
+        if label_filters:
+            collection = collection.where(**label_filters)
+
+        series_list = collection.list_series()
+
+        return [
+            SeriesInfo(
+                series_id=s["series_id"],
+                name=s["name"],
+                description=s.get("description"),
+                unit=s["unit"],
+                labels=s.get("labels", {}),
+                overlapping=s["overlapping"],
+                retention=s["retention"],
+            )
+            for s in series_list
+        ]
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error listing time series: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error listing series: {str(e)}")
+
+
+@app.get("/series/labels")
+async def list_labels(
+    request: Request,
+    label_key: str = Query(..., description="The label key to get unique values for"),
+    name: Optional[str] = Query(None, description="Filter by series name"),
+    labels: Optional[str] = Query(None, description="Filter by labels (JSON)"),
+):
+    """
+    List unique values for a specific label key across matching series.
+
+    Example: GET /series/labels?label_key=site&name=wind_power
+    Returns: {"label_key": "site", "values": ["Gotland", "Aland"]}
+    """
+    try:
+        label_filters = _parse_labels(labels)
+
+        td = _get_client(request)
+        collection = td.series(name=name)
+        if label_filters:
+            collection = collection.where(**label_filters)
+
+        values = collection.list_labels(label_key)
+
+        return {"label_key": label_key, "values": sorted(values)}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error listing labels: {str(e)}")
+
+
+@app.get("/series/count")
+async def count_series(
+    request: Request,
+    name: Optional[str] = Query(None, description="Filter by series name"),
+    labels: Optional[str] = Query(None, description="Filter by labels (JSON)"),
+    unit: Optional[str] = Query(None, description="Filter by unit"),
+):
+    """
+    Count time series matching the filters.
+
+    Returns: {"count": 42}
+    """
+    try:
+        label_filters = _parse_labels(labels)
+
+        td = _get_client(request)
+        collection = td.series(name=name, unit=unit)
+        if label_filters:
+            collection = collection.where(**label_filters)
+
+        count = collection.count()
+
+        return {"count": count}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error counting series: {str(e)}")
 
 
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="127.0.0.1", port=8000)
-

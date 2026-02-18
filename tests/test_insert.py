@@ -1,168 +1,295 @@
-"""Tests for inserting runs and values."""
+"""Tests for inserting flat and overlapping data."""
+import os
 import pytest
 import psycopg
-import uuid
 from datetime import datetime, timezone, timedelta
-from timedb.db import insert, read
+import pandas as pd
+from timedb import TimeDataClient
 
 
-def test_insert_run(clean_db, sample_run_id, sample_tenant_id, sample_workflow_id, sample_datetime):
-    """Test inserting a run."""
+# =============================================================================
+# Flat insertion tests
+# =============================================================================
+
+def test_insert_flat_no_batch(clean_db, sample_datetime):
+    """Test inserting flat via SDK creates no batch and rows in the flat table."""
+    os.environ["TIMEDB_DSN"] = clean_db
+    td = TimeDataClient()
+
+    td.create_series(name="temperature", unit="dimensionless", overlapping=False)
+
+    df = pd.DataFrame({
+        "valid_time": [sample_datetime, sample_datetime + timedelta(hours=1)],
+        "value": [20.5, 21.0],
+    })
+
+    result = td.series("temperature").insert(df=df)
+
+    assert result.batch_id is None
+    assert result.series_id > 0
+
+    # Verify rows in flat table
     with psycopg.connect(clean_db) as conn:
-        insert.insert_run(
-            conn,
-            run_id=sample_run_id,
-            tenant_id=sample_tenant_id,
-            workflow_id=sample_workflow_id,
-            run_start_time=sample_datetime,
-        )
-        
-        # Verify run was inserted
         with conn.cursor() as cur:
-            cur.execute(
-                "SELECT workflow_id, run_start_time FROM runs_table WHERE run_id = %s",
-                (sample_run_id,)
-            )
-            row = cur.fetchone()
-            assert row is not None
-            assert row[0] == sample_workflow_id
+            cur.execute("SELECT COUNT(*) FROM flat")
+            assert cur.fetchone()[0] == 2
+
+            # Verify no batch was created
+            cur.execute("SELECT COUNT(*) FROM batches_table")
+            assert cur.fetchone()[0] == 0
+
+            # Verify no rows in any overlapping table
+            cur.execute("SELECT COUNT(*) FROM overlapping_medium")
+            assert cur.fetchone()[0] == 0
 
 
-def test_insert_run_with_known_time(clean_db, sample_run_id, sample_tenant_id, sample_workflow_id, sample_datetime):
-    """Test inserting a run with explicit known_time."""
+def test_insert_flat_with_known_time(clean_db, sample_datetime):
+    """Test inserting flat with explicit known_time still skips batch."""
     known_time = sample_datetime - timedelta(hours=1)
-    
+
+    os.environ["TIMEDB_DSN"] = clean_db
+    td = TimeDataClient()
+
+    td.create_series(name="temperature", unit="dimensionless", overlapping=False)
+
+    df = pd.DataFrame({
+        "valid_time": [sample_datetime],
+        "value": [20.5],
+    })
+
+    result = td.series("temperature").insert(
+        df=df,
+        batch_start_time=sample_datetime,
+        known_time=known_time,
+    )
+
+    # Flat inserts should not create a batch even with known_time
+    assert result.batch_id is None
+
+    # Verify data was inserted
     with psycopg.connect(clean_db) as conn:
-        insert.insert_run(
-            conn,
-            run_id=sample_run_id,
-            tenant_id=sample_tenant_id,
-            workflow_id=sample_workflow_id,
-            run_start_time=sample_datetime,
-            known_time=known_time,
-        )
-        
-        # Verify known_time was set correctly
         with conn.cursor() as cur:
-            cur.execute(
-                "SELECT known_time FROM runs_table WHERE run_id = %s",
-                (sample_run_id,)
-            )
-            row = cur.fetchone()
-            assert row is not None
-            # Compare timestamps (allowing for small differences)
-            stored_time = row[0]
-            assert abs((stored_time - known_time).total_seconds()) < 1
+            cur.execute("SELECT COUNT(*) FROM flat")
+            assert cur.fetchone()[0] == 1
+
+            cur.execute("SELECT COUNT(*) FROM batches_table")
+            assert cur.fetchone()[0] == 0
 
 
-def test_insert_values_point_in_time(clean_db, sample_run_id, sample_tenant_id, sample_series_id, sample_workflow_id, sample_datetime):
-    """Test inserting point-in-time values."""
+def test_insert_flat_point_in_time(clean_db, sample_datetime):
+    """Test inserting multiple point-in-time flat data."""
+    os.environ["TIMEDB_DSN"] = clean_db
+    td = TimeDataClient()
+
+    td.create_series(name="power", unit="dimensionless", overlapping=False)
+
+    df = pd.DataFrame({
+        "valid_time": [
+            sample_datetime,
+            sample_datetime + timedelta(hours=1),
+            sample_datetime + timedelta(hours=2),
+        ],
+        "value": [100.5, 101.0, 102.5],
+    })
+
+    result = td.series("power").insert(df=df)
+
     with psycopg.connect(clean_db) as conn:
-        # Insert run first
-        insert.insert_run(
-            conn,
-            run_id=sample_run_id,
-            tenant_id=sample_tenant_id,
-            workflow_id=sample_workflow_id,
-            run_start_time=sample_datetime,
-        )
-        
-        # Insert values
-        value_rows = [
-            (sample_tenant_id, sample_datetime, sample_series_id, "mean", 100.5),
-            (sample_tenant_id, sample_datetime + timedelta(hours=1), sample_series_id, "mean", 101.0),
-            (sample_tenant_id, sample_datetime + timedelta(hours=2), sample_series_id, "quantile:0.5", 102.5),
-        ]
-        insert.insert_values(conn, run_id=sample_run_id, value_rows=value_rows)
-        
-        # Verify values were inserted
         with conn.cursor() as cur:
-            cur.execute(
-                "SELECT COUNT(*) FROM values_table WHERE run_id = %s",
-                (sample_run_id,)
-            )
+            cur.execute("SELECT COUNT(*) FROM flat")
             assert cur.fetchone()[0] == 3
 
 
-def test_insert_values_interval(clean_db, sample_run_id, sample_tenant_id, sample_series_id, sample_workflow_id, sample_datetime):
-    """Test inserting interval values."""
+def test_insert_flat_interval(clean_db, sample_datetime):
+    """Test inserting interval flat data with valid_time_end."""
+    os.environ["TIMEDB_DSN"] = clean_db
+    td = TimeDataClient()
+
+    td.create_series(name="energy", unit="dimensionless", overlapping=False)
+
+    df = pd.DataFrame({
+        "valid_time": [sample_datetime],
+        "valid_time_end": [sample_datetime + timedelta(hours=1)],
+        "value": [500.0],
+    })
+
+    result = td.series("energy").insert(df=df)
+
     with psycopg.connect(clean_db) as conn:
-        # Insert run first
-        insert.insert_run(
-            conn,
-            run_id=sample_run_id,
-            tenant_id=sample_tenant_id,
-            workflow_id=sample_workflow_id,
-            run_start_time=sample_datetime,
-        )
-        
-        # Insert interval values (tenant_id, valid_time, valid_time_end, series_id, value_key, value)
-        value_rows = [
-            (
-                sample_tenant_id,
-                sample_datetime,
-                sample_datetime + timedelta(hours=1),
-                sample_series_id,
-                "mean",
-                100.5
-            ),
-        ]
-        insert.insert_values(conn, run_id=sample_run_id, value_rows=value_rows)
-        
-        # Verify interval value was inserted
         with conn.cursor() as cur:
-            cur.execute(
-                "SELECT valid_time_end FROM values_table WHERE run_id = %s",
-                (sample_run_id,)
-            )
+            cur.execute("SELECT valid_time_end FROM flat")
             row = cur.fetchone()
             assert row is not None
             assert row[0] is not None
 
 
-def test_insert_run_with_values(clean_db, sample_run_id, sample_tenant_id, sample_series_id, sample_workflow_id, sample_datetime):
-    """Test the convenience function that inserts run and values together."""
-    value_rows = [
-        (sample_tenant_id, sample_datetime, sample_series_id, "mean", 100.5),
-        (sample_tenant_id, sample_datetime + timedelta(hours=1), sample_series_id, "mean", 101.0),
-    ]
-    
-    insert.insert_run_with_values(
-        clean_db,
-        run_id=sample_run_id,
-        tenant_id=sample_tenant_id,
-        workflow_id=sample_workflow_id,
-        run_start_time=sample_datetime,
-        run_finish_time=None,
-        value_rows=value_rows,
-    )
-    
-    # Verify both run and values exist
+def test_insert_flat_upsert(clean_db, sample_datetime):
+    """Test that inserting the same flat data twice upserts (updates value)."""
+    os.environ["TIMEDB_DSN"] = clean_db
+    td = TimeDataClient()
+
+    td.create_series(name="meter", unit="dimensionless", overlapping=False)
+
+    # First insert
+    df1 = pd.DataFrame({
+        "valid_time": [sample_datetime],
+        "value": [100.0],
+    })
+    td.series("meter").insert(df=df1)
+
+    # Second insert with different value for same valid_time
+    df2 = pd.DataFrame({
+        "valid_time": [sample_datetime],
+        "value": [150.0],
+    })
+    td.series("meter").insert(df=df2)
+
+    # Should still have only 1 row (upsert), with updated value
     with psycopg.connect(clean_db) as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT COUNT(*) FROM runs_table WHERE run_id = %s", (sample_run_id,))
+            cur.execute("SELECT COUNT(*) FROM flat")
             assert cur.fetchone()[0] == 1
-            
-            cur.execute("SELECT COUNT(*) FROM values_table WHERE run_id = %s", (sample_run_id,))
+
+            cur.execute("SELECT value FROM flat")
+            assert cur.fetchone()[0] == 150.0
+
+
+# =============================================================================
+# Overlapping insertion tests
+# =============================================================================
+
+def test_insert_overlapping_creates_batch(clean_db, sample_datetime):
+    """Test inserting overlapping via SDK creates rows in overlapping_medium table."""
+    os.environ["TIMEDB_DSN"] = clean_db
+    td = TimeDataClient()
+
+    td.create_series(
+        name="wind_forecast", unit="dimensionless",
+        overlapping=True, retention="medium",
+    )
+
+    df = pd.DataFrame({
+        "valid_time": [sample_datetime, sample_datetime + timedelta(hours=1)],
+        "value": [50.0, 55.0],
+    })
+
+    result = td.series("wind_forecast").insert(df=df, known_time=sample_datetime)
+
+    assert result.batch_id is not None
+    assert result.series_id > 0
+
+    # Verify rows in overlapping_medium
+    with psycopg.connect(clean_db) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM overlapping_medium WHERE batch_id = %s",
+                (result.batch_id,)
+            )
             assert cur.fetchone()[0] == 2
 
+            # Verify no rows in flat
+            cur.execute("SELECT COUNT(*) FROM flat")
+            assert cur.fetchone()[0] == 0
 
-def test_insert_values_timezone_aware(clean_db, sample_run_id, sample_tenant_id, sample_series_id, sample_workflow_id):
-    """Test that timezone-aware datetimes are required."""
+
+def test_insert_overlapping_short_tier(clean_db):
+    """Test inserting overlapping with retention='short'."""
+    # Use a recent datetime to avoid the 6-month retention policy on overlapping_short
+    recent_time = datetime.now(timezone.utc).replace(microsecond=0)
+
+    os.environ["TIMEDB_DSN"] = clean_db
+    td = TimeDataClient()
+
+    td.create_series(
+        name="price_forecast", unit="dimensionless",
+        overlapping=True, retention="short",
+    )
+
+    df = pd.DataFrame({
+        "valid_time": [recent_time],
+        "value": [42.0],
+    })
+
+    td.series("price_forecast").insert(df=df, known_time=recent_time)
+
     with psycopg.connect(clean_db) as conn:
-        insert.insert_run(
-            conn,
-            run_id=sample_run_id,
-            tenant_id=sample_tenant_id,
-            workflow_id=sample_workflow_id,
-            run_start_time=datetime(2025, 1, 1, 12, 0, tzinfo=timezone.utc),
-        )
-        
-        # Try to insert with timezone-naive datetime - should raise ValueError
-        with pytest.raises(ValueError, match="timezone-aware"):
-            insert.insert_values(
-                conn,
-                run_id=sample_run_id,
-                value_rows=[(sample_tenant_id, datetime(2025, 1, 1, 12, 0), sample_series_id, "mean", 100.5)],
-            )
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM overlapping_short")
+            assert cur.fetchone()[0] == 1
 
+            cur.execute("SELECT COUNT(*) FROM overlapping_medium")
+            assert cur.fetchone()[0] == 0
+
+            cur.execute("SELECT COUNT(*) FROM overlapping_long")
+            assert cur.fetchone()[0] == 0
+
+
+def test_insert_overlapping_long_tier(clean_db, sample_datetime):
+    """Test inserting overlapping with retention='long'."""
+    os.environ["TIMEDB_DSN"] = clean_db
+    td = TimeDataClient()
+
+    td.create_series(
+        name="climate_forecast", unit="dimensionless",
+        overlapping=True, retention="long",
+    )
+
+    df = pd.DataFrame({
+        "valid_time": [sample_datetime],
+        "value": [15.0],
+    })
+
+    td.series("climate_forecast").insert(df=df, known_time=sample_datetime)
+
+    with psycopg.connect(clean_db) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM overlapping_long")
+            assert cur.fetchone()[0] == 1
+
+
+def test_insert_overlapping_interval(clean_db, sample_datetime):
+    """Test inserting interval overlapping with valid_time_end."""
+    os.environ["TIMEDB_DSN"] = clean_db
+    td = TimeDataClient()
+
+    td.create_series(
+        name="energy_forecast", unit="dimensionless",
+        overlapping=True, retention="medium",
+    )
+
+    df = pd.DataFrame({
+        "valid_time": [sample_datetime],
+        "valid_time_end": [sample_datetime + timedelta(hours=1)],
+        "value": [500.0],
+    })
+
+    td.series("energy_forecast").insert(
+        df=df, known_time=sample_datetime,
+    )
+
+    with psycopg.connect(clean_db) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT valid_time_end FROM overlapping_medium")
+            row = cur.fetchone()
+            assert row is not None
+            assert row[0] is not None
+
+
+# =============================================================================
+# Timezone validation
+# =============================================================================
+
+def test_insert_timezone_aware_required(clean_db):
+    """Test that timezone-aware datetimes are required."""
+    os.environ["TIMEDB_DSN"] = clean_db
+    td = TimeDataClient()
+
+    td.create_series(name="temp", unit="dimensionless", overlapping=False)
+
+    df = pd.DataFrame({
+        "valid_time": [datetime(2025, 1, 1, 12, 0)],  # naive datetime
+        "value": [20.0],
+    })
+
+    with pytest.raises(ValueError, match="timezone-aware"):
+        td.series("temp").insert(df=df)

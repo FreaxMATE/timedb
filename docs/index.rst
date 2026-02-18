@@ -12,6 +12,7 @@ Most time series systems assume a single immutable value per timestamp. **timedb
 - ⏱️ Retain "time-of-knowledge" history through a three-dimensional time series data model
 - ✍️ Make versioned ad-hoc updates to the time series data with annotations and tags
 - 🔀 Represent both timestamp and time-interval time series simultaneously
+- 🏷️ Organize data with labels for flexible filtering and discovery
 
 Quick Start
 -----------
@@ -22,23 +23,39 @@ Quick Start
 
 .. code-block:: python
 
-   import timedb as td
+   from timedb import TimeDataClient
    import pandas as pd
    from datetime import datetime, timezone, timedelta
 
-   # Create database schema
+   # Create client and schema
+   td = TimeDataClient()
    td.create()
 
-   # Create time series data
+   # Create a series with labels
+   td.create_series(
+       name='wind_power',
+       unit='MW',
+       labels={'site': 'offshore_1'},
+       overlapping=True  # Versioned forecasts
+   )
+
+   # Insert data using fluent API
    base_time = datetime(2025, 1, 1, 0, 0, tzinfo=timezone.utc)
    df = pd.DataFrame({
        'valid_time': [base_time + timedelta(hours=i) for i in range(24)],
-       'value': [20.0 + i * 0.3 for i in range(24)]
+       'value': [100.0 + i * 2 for i in range(24)]
    })
 
-   # Insert and read back
-   result = td.insert_run(df=df)
-   df_read = td.read()
+   result = td.series('wind_power').where(site='offshore_1').insert(
+       df=df,
+       known_time=base_time
+   )
+
+   # Read latest values
+   df_latest = td.series('wind_power').where(site='offshore_1').read()
+
+   # Read all forecast revisions
+   df_versions = td.series('wind_power').where(site='offshore_1').read(versions=True)
 
 Documentation
 -------------
@@ -48,10 +65,11 @@ Documentation
    :caption: Contents:
 
    installation
+   api_reference
+   examples
    cli
    sdk
    api_setup
-   examples
 
 Indices and tables
 ==================
@@ -59,4 +77,3 @@ Indices and tables
 * :ref:`genindex`
 * :ref:`modindex`
 * :ref:`search`
-

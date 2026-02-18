@@ -3,7 +3,6 @@ import os
 import pytest
 import psycopg
 from datetime import datetime, timezone
-import uuid
 
 from timedb.db import create, delete
 
@@ -19,38 +18,20 @@ def test_db_conninfo():
 
 @pytest.fixture(scope="function")
 def clean_db(test_db_conninfo):
-    """Create a clean database schema for each test (main schema with value_key)."""
+    """Create a clean database schema for each test.
+
+    Creates the full TimescaleDB schema including:
+    - batches_table, series_table
+    - flat (hypertable for immutable facts)
+    - overlapping_short/medium/long (hypertables for versioned overlapping)
+    """
     # Delete existing schema if it exists
     delete.delete_schema(test_db_conninfo)
-    
+
     # Create fresh schema
     create.create_schema(test_db_conninfo)
-    
+
     yield test_db_conninfo
-    
-    # Cleanup after test (optional - can be commented out to inspect data)
-    # delete.delete_schema(test_db_conninfo)
-
-
-@pytest.fixture(scope="function")
-def clean_db_for_update(test_db_conninfo):
-    """Create a clean database schema for update tests (uses main schema which supports updates)."""
-    # Delete existing schema if it exists
-    delete.delete_schema(test_db_conninfo)
-    
-    # Create main schema (now supports updates)
-    create.create_schema(test_db_conninfo)
-    
-    yield test_db_conninfo
-    
-    # Cleanup after test (optional - can be commented out to inspect data)
-    # delete.delete_schema(test_db_conninfo)
-
-
-@pytest.fixture
-def sample_run_id():
-    """Generate a sample run ID for testing."""
-    return uuid.uuid4()
 
 
 @pytest.fixture
@@ -63,16 +44,3 @@ def sample_workflow_id():
 def sample_datetime():
     """Sample datetime for testing."""
     return datetime(2025, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
-
-
-@pytest.fixture
-def sample_tenant_id():
-    """Generate a sample tenant ID for testing."""
-    return uuid.uuid4()
-
-
-@pytest.fixture
-def sample_series_id():
-    """Generate a sample series ID for testing."""
-    return uuid.uuid4()
-

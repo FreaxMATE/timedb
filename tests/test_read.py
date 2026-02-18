@@ -1,154 +1,246 @@
-"""Tests for reading values from the database."""
+"""Tests for reading flat and overlapping."""
+import os
 import pytest
 import pandas as pd
+import numpy as np
 from datetime import datetime, timezone, timedelta
-from timedb.db import insert, read
+from timedb import TimeDataClient
+from timedb.db import read
 
 
-def test_read_values_flat_mode(clean_db, sample_run_id, sample_tenant_id, sample_series_id, sample_workflow_id, sample_datetime):
-    """Test reading values in flat mode."""
-    # Insert run with values
-    value_rows = [
-        (sample_tenant_id, sample_datetime, sample_series_id, "mean", 100.5),
-        (sample_tenant_id, sample_datetime + timedelta(hours=1), sample_series_id, "mean", 101.0),
-        (sample_tenant_id, sample_datetime, sample_series_id, "quantile:0.5", 99.5),
-    ]
-    
-    insert.insert_run_with_values(
-        clean_db,
-        run_id=sample_run_id,
-        tenant_id=sample_tenant_id,
-        workflow_id=sample_workflow_id,
-        run_start_time=sample_datetime,
-        run_finish_time=None,
-        value_rows=value_rows,
-    )
-    
-    # Read values in flat mode
-    df = read.read_values_between(
-        clean_db,
-        tenant_id=sample_tenant_id,
+# =============================================================================
+# Read flat tests
+# =============================================================================
+
+def test_read_flat_via_sdk(clean_db, sample_datetime):
+    """Test reading flat via SDK returns a pivoted DataFrame."""
+    os.environ["TIMEDB_DSN"] = clean_db
+    td = TimeDataClient()
+
+    td.create_series(name="temperature", unit="dimensionless", overlapping=False)
+    td.create_series(name="humidity", unit="dimensionless", overlapping=False)
+
+    df_temp = pd.DataFrame({
+        "valid_time": [sample_datetime, sample_datetime + timedelta(hours=1)],
+        "value": [20.5, 21.0],
+    })
+    td.series("temperature").insert(df=df_temp)
+
+    df_hum = pd.DataFrame({
+        "valid_time": [sample_datetime],
+        "value": [65.0],
+    })
+    td.series("humidity").insert(df=df_hum)
+
+    # Read all flat via SDK
+    df = td.series("temperature").read(
         start_valid=sample_datetime,
         end_valid=sample_datetime + timedelta(hours=2),
-        mode="flat",
     )
-    
-    # Verify results
-    assert isinstance(df, pd.DataFrame)
-    assert len(df) == 3
-    assert ("valid_time", "value_key") in [df.index.names]
-    
-    # Check specific values
-    assert df.loc[(sample_datetime, "mean"), "value"] == 100.5
-    assert df.loc[(sample_datetime, "quantile:0.5"), "value"] == 99.5
 
-
-def test_read_values_overlapping_mode(clean_db, sample_run_id, sample_tenant_id, sample_series_id, sample_workflow_id, sample_datetime):
-    """Test reading values in overlapping mode."""
-    # Insert run with values
-    value_rows = [
-        (sample_tenant_id, sample_datetime, sample_series_id, "mean", 100.5),
-        (sample_tenant_id, sample_datetime + timedelta(hours=1), sample_series_id, "mean", 101.0),
-    ]
-    
-    insert.insert_run_with_values(
-        clean_db,
-        run_id=sample_run_id,
-        tenant_id=sample_tenant_id,
-        workflow_id=sample_workflow_id,
-        run_start_time=sample_datetime,
-        run_finish_time=None,
-        value_rows=value_rows,
-    )
-    
-    # Read values in overlapping mode
-    df = read.read_values_between(
-        clean_db,
-        tenant_id=sample_tenant_id,
-        start_valid=sample_datetime,
-        end_valid=sample_datetime + timedelta(hours=2),
-        mode="overlapping",
-    )
-    
-    # Verify results
     assert isinstance(df, pd.DataFrame)
     assert len(df) == 2
-    assert ("known_time", "valid_time", "value_key") in [df.index.names]
-    assert "known_time" in df.index.names
+    assert "valid_time" in df.index.names or df.index.name == "valid_time"
 
 
-def test_read_values_filter_by_valid_time(clean_db, sample_run_id, sample_tenant_id, sample_series_id, sample_workflow_id, sample_datetime):
-    """Test filtering by valid_time range."""
-    # Insert values at different times
-    value_rows = [
-        (sample_tenant_id, sample_datetime, sample_series_id, "mean", 100.0),
-        (sample_tenant_id, sample_datetime + timedelta(hours=1), sample_series_id, "mean", 101.0),
-        (sample_tenant_id, sample_datetime + timedelta(hours=2), sample_series_id, "mean", 102.0),
-        (sample_tenant_id, sample_datetime + timedelta(hours=3), sample_series_id, "mean", 103.0),
-    ]
-    
-    insert.insert_run_with_values(
+def test_read_flat_db_layer(clean_db, sample_datetime):
+    """Test reading flat via the db.read layer."""
+    os.environ["TIMEDB_DSN"] = clean_db
+    td = TimeDataClient()
+
+    series_id = td.create_series(name="power", unit="dimensionless", overlapping=False)
+
+    df = pd.DataFrame({
+        "valid_time": [sample_datetime, sample_datetime + timedelta(hours=1)],
+        "value": [100.0, 101.0],
+    })
+    td.series("power").insert(df=df)
+
+    # Read via db layer
+    result = read.read_flat(
         clean_db,
-        run_id=sample_run_id,
-        tenant_id=sample_tenant_id,
-        workflow_id=sample_workflow_id,
-        run_start_time=sample_datetime,
-        run_finish_time=None,
-        value_rows=value_rows,
+        series_id=series_id,
+        start_valid=sample_datetime,
+        end_valid=sample_datetime + timedelta(hours=2),
     )
-    
-    # Read only values in a specific range
-    df = read.read_values_between(
+
+    assert isinstance(result, pd.DataFrame)
+    assert len(result) == 2
+    assert result.index.name == "valid_time"
+
+
+def test_read_flat_filter_by_valid_time(clean_db, sample_datetime):
+    """Test filtering flat by valid_time range."""
+    os.environ["TIMEDB_DSN"] = clean_db
+    td = TimeDataClient()
+
+    series_id = td.create_series(name="power", unit="dimensionless", overlapping=False)
+
+    df = pd.DataFrame({
+        "valid_time": [
+            sample_datetime,
+            sample_datetime + timedelta(hours=1),
+            sample_datetime + timedelta(hours=2),
+            sample_datetime + timedelta(hours=3),
+        ],
+        "value": [100.0, 101.0, 102.0, 103.0],
+    })
+    td.series("power").insert(df=df)
+
+    # Read only a subset
+    result = read.read_flat(
         clean_db,
-        tenant_id=sample_tenant_id,
+        series_id=series_id,
         start_valid=sample_datetime + timedelta(hours=1),
         end_valid=sample_datetime + timedelta(hours=3),
-        mode="flat",
     )
-    
+
     # Should only get 2 values (hours 1 and 2)
-    assert len(df) == 2
+    assert len(result) == 2
     assert all(
-        sample_datetime + timedelta(hours=1) <= idx[0] < sample_datetime + timedelta(hours=3)
-        for idx in df.index
+        sample_datetime + timedelta(hours=1) <= idx < sample_datetime + timedelta(hours=3)
+        for idx in result.index
     )
 
 
-def test_read_values_all_versions(clean_db_for_update, sample_run_id, sample_tenant_id, sample_series_id, sample_workflow_id, sample_datetime):
-    """Test reading all versions (including non-current)."""
-    from timedb.db import update
-    import psycopg
-    
-    # Insert initial value
-    with psycopg.connect(clean_db_for_update) as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "INSERT INTO runs_table (run_id, tenant_id, workflow_id, run_start_time) VALUES (%s, %s, %s, %s)",
-                (sample_run_id, sample_tenant_id, sample_workflow_id, sample_datetime),
-            )
-            cur.execute(
-                "INSERT INTO values_table (run_id, tenant_id, series_id, valid_time, value, is_current) VALUES (%s, %s, %s, %s, %s, true)",
-                (sample_run_id, sample_tenant_id, sample_series_id, sample_datetime, 100.0),
-            )
-    
-    # Update the value (creates a new version)
-    with psycopg.connect(clean_db_for_update) as conn:
-        update_dict = {
-            "run_id": sample_run_id,
-            "tenant_id": sample_tenant_id,
-            "valid_time": sample_datetime,
-            "series_id": sample_series_id,
-            "value": 101.0,
-            "changed_by": "test",
-        }
-        update.update_records(conn, updates=[update_dict])
-    
-    # Read with all_versions=True (note: read function uses main schema, so this test may need adjustment)
-    # For now, we'll skip the read part since it uses a different schema
-    # In a real scenario, you'd need to ensure schema compatibility
-    
-    # Should have more rows when including all versions
-    assert len(df_all) >= len(df_current)
-    # Current version should be 101.0
-    assert df_current.loc[(sample_datetime, "mean"), "value"] == 101.0
+# =============================================================================
+# Read overlapping tests
+# =============================================================================
 
+def test_read_overlapping_latest_via_sdk(clean_db, sample_datetime):
+    """Test reading latest overlapping via SDK."""
+    os.environ["TIMEDB_DSN"] = clean_db
+    td = TimeDataClient()
+
+    td.create_series(
+        name="wind_forecast", unit="dimensionless",
+        overlapping=True, retention="medium",
+    )
+
+    df = pd.DataFrame({
+        "valid_time": [sample_datetime, sample_datetime + timedelta(hours=1)],
+        "value": [50.0, 55.0],
+    })
+    td.series("wind_forecast").insert(df=df, known_time=sample_datetime)
+
+    # Read latest (default, versions=False)
+    result = td.series("wind_forecast").read(
+        start_valid=sample_datetime,
+        end_valid=sample_datetime + timedelta(hours=2),
+    )
+
+    assert isinstance(result, pd.DataFrame)
+    assert len(result) == 2
+
+
+def test_read_overlapping_all_versions_via_sdk(clean_db, sample_datetime):
+    """Test reading all overlapping versions via SDK (versions=True)."""
+    os.environ["TIMEDB_DSN"] = clean_db
+    td = TimeDataClient()
+
+    td.create_series(
+        name="wind_forecast", unit="dimensionless",
+        overlapping=True, retention="medium",
+    )
+
+    # Insert first batch
+    known_time_1 = sample_datetime
+    df1 = pd.DataFrame({
+        "valid_time": [sample_datetime, sample_datetime + timedelta(hours=1)],
+        "value": [50.0, 55.0],
+    })
+    td.series("wind_forecast").insert(df=df1, known_time=known_time_1)
+
+    # Insert second batch (revision) for the same valid times
+    known_time_2 = sample_datetime + timedelta(hours=1)
+    df2 = pd.DataFrame({
+        "valid_time": [sample_datetime, sample_datetime + timedelta(hours=1)],
+        "value": [52.0, 57.0],
+    })
+    td.series("wind_forecast").insert(df=df2, known_time=known_time_2)
+
+    # Read all versions
+    result = td.series("wind_forecast").read(
+        versions=True,
+        start_valid=sample_datetime,
+        end_valid=sample_datetime + timedelta(hours=2),
+    )
+
+    assert isinstance(result, pd.DataFrame)
+    # Should have 4 rows (2 valid_times x 2 known_times)
+    assert len(result) == 4
+    assert "known_time" in result.index.names
+
+
+def test_read_overlapping_all_versions_db_layer(clean_db, sample_datetime):
+    """Test reading all overlapping versions via the db.read layer."""
+    os.environ["TIMEDB_DSN"] = clean_db
+    td = TimeDataClient()
+
+    series_id = td.create_series(
+        name="forecast", unit="dimensionless",
+        overlapping=True, retention="medium",
+    )
+
+    known_time_1 = sample_datetime
+    df1 = pd.DataFrame({
+        "valid_time": [sample_datetime],
+        "value": [100.0],
+    })
+    td.series("forecast").insert(df=df1, known_time=known_time_1)
+
+    known_time_2 = sample_datetime + timedelta(hours=1)
+    df2 = pd.DataFrame({
+        "valid_time": [sample_datetime],
+        "value": [105.0],
+    })
+    td.series("forecast").insert(df=df2, known_time=known_time_2)
+
+    result = read.read_overlapping_all(
+        clean_db,
+        series_id=series_id,
+        start_valid=sample_datetime,
+        end_valid=sample_datetime + timedelta(hours=1),
+    )
+
+    assert isinstance(result, pd.DataFrame)
+    assert len(result) == 2
+    assert list(result.index.names) == ["known_time", "valid_time"]
+
+
+def test_read_overlapping_latest_picks_newest(clean_db, sample_datetime):
+    """Test that latest overlapping read picks the most recent known_time."""
+    os.environ["TIMEDB_DSN"] = clean_db
+    td = TimeDataClient()
+
+    td.create_series(
+        name="price", unit="dimensionless",
+        overlapping=True, retention="medium",
+    )
+
+    # Insert initial forecast
+    df1 = pd.DataFrame({
+        "valid_time": [sample_datetime],
+        "value": [100.0],
+    })
+    td.series("price").insert(df=df1, known_time=sample_datetime)
+
+    # Insert revised forecast with newer known_time
+    df2 = pd.DataFrame({
+        "valid_time": [sample_datetime],
+        "value": [110.0],
+    })
+    td.series("price").insert(
+        df=df2,
+        known_time=sample_datetime + timedelta(hours=1),
+    )
+
+    # Read latest via SDK
+    result = td.series("price").read(
+        start_valid=sample_datetime,
+        end_valid=sample_datetime + timedelta(hours=1),
+    )
+
+    assert len(result) == 1
+    # The latest value should be 110.0
+    assert result.iloc[0, 0] == 110.0

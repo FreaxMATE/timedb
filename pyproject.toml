@@ -19,18 +19,38 @@ requires-python = ">=3.9"
 dependencies = [
   "typer>=0.9.0",             # CLI framework with Rich integration
   "psycopg[binary]>=3.1",     # psycopg3 with binary wheels on macOS
+  "psycopg_pool>=3.1",         # Connection pooling for psycopg3
   "python-dotenv>=0.21",      # load_dotenv used in helper scripts
   "fastapi>=0.104.0",
   "uvicorn[standard]>=0.24.0",
   "pydantic>=2.0.0",
   "pandas>=2.0.0",
-  "sqlalchemy>=2.0.0",
-  "matplotlib>=3.7.5",
-  "pint>=0.23",               # Unit handling and conversion
-  "pint-pandas>=0.3",         # Pandas integration for Pint units
-  "ipykernel>=6.31.0",
   "requests>=2.32.5",
   "modal>=1.2.6",
+]
+
+[project.optional-dependencies]
+test = [
+  "pytest>=8.4.2",
+  "pytest-cov>=5.0.0",
+  "pint>=0.23",
+  "pint-pandas>=0.6",
+  "nbmake>=1.5",
+]
+notebooks = [
+  "ipykernel>=6.31.0",
+  "jupyter>=1.1.1",
+  "notebook>=7.5.2",
+  "seaborn>=0.13.2",
+]
+pint = [
+  "pint>=0.23",
+  "pint-pandas>=0.6",
+]
+docs = [
+  "sphinx>=7.4.7",
+  "nbsphinx>=0.9.8",
+  "sphinx-rtd-theme>=3.1.0",
 ]
 
 # expose the CLI command 'timedb' which points to the Typer app in timedb/cli.py

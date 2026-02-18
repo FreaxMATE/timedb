@@ -13,13 +13,31 @@ or if you are using `uv <https://docs.astral.sh/uv/>`_:
 
    uv add timedb
 
+**Install from Cloned Repository:**
+
+To install timedb from a cloned repository for development:
+
+.. code-block:: bash
+
+   git clone https://github.com/rebase-energy/timedb.git
+   cd timedb
+   pip install -e .
+
+To also install test dependencies:
+
+.. code-block:: bash
+
+   pip install -e ".[test]"
+
+The ``-e`` flag installs the package in editable mode, allowing you to make changes to the code and see them reflected immediately without reinstalling.
+
 Requirements
 ------------
 
 timedb requires:
 
 - Python 3.9 or higher
-- PostgreSQL database (version 12+)
+- PostgreSQL database (version 12+) with TimescaleDB extension (version 2.0+)
 - For API functionality: FastAPI and uvicorn (included in dependencies)
 
 Dependencies
@@ -29,20 +47,59 @@ timedb includes the following key dependencies:
 
 - ``psycopg[binary]>=3.1`` - PostgreSQL adapter (psycopg3)
 - ``pandas>=2.0.0`` - Data manipulation
-- ``pint>=0.23`` - Unit handling and conversion
-- ``pint-pandas>=0.3`` - Pandas integration for Pint units
 - ``fastapi>=0.104.0`` - API framework (for REST API server)
 - ``uvicorn[standard]>=0.24.0`` - ASGI server (for REST API server)
 - ``typer>=0.9.0`` - CLI framework
 
+Optional dependencies can be installed with extras:
+
+.. code-block:: bash
+
+   pip install timedb[pint]       # pint and pint-pandas for unit handling
+
 Database Setup
 --------------
 
-Before using timedb, you need a PostgreSQL database. You can use:
+Before using timedb, you need a PostgreSQL database with the TimescaleDB extension enabled. You can use:
 
-- A local PostgreSQL instance
-- A cloud-hosted database (e.g., Neon, Supabase, AWS RDS)
-- A Docker container running PostgreSQL
+- A local PostgreSQL instance with TimescaleDB installed
+- A cloud-hosted TimescaleDB instance (e.g., Timescale Cloud)
+- A Docker container running TimescaleDB
+
+**TimescaleDB Installation with Docker (Recommended):**
+
+The project includes a ``timescaledb-test`` directory with a pre-configured Docker Compose setup:
+
+.. code-block:: bash
+
+   cd timescaledb-test
+   docker compose up -d
+
+This starts a TimescaleDB container with:
+
+- Host: ``localhost``
+- Port: ``5433`` (mapped from container port 5432)
+- User: ``postgres``
+- Password: ``devpassword``
+- Database: ``devdb``
+
+.. note::
+
+   The Docker Compose setup uses the **TimescaleDB Community Edition**, which is suitable for testing and development only. The Community Edition does not include advanced features such as:
+   
+   - Compression
+   - Multi-node replication
+   - Advanced analytics features
+   
+   For production use or to access all features, consider using `Timescale Cloud <https://www.timescale.com/cloud>`_ or the `Enterprise Edition <https://docs.timescale.com/enterprise-timescale/latest/>`_.
+
+To stop the container:
+
+.. code-block:: bash
+
+   docker compose down
+
+For local installation without Docker, see `TimescaleDB Installation Guide <https://docs.timescale.com/self-hosted/latest/install/>`_.
 
 Set up your database connection using one of these environment variables:
 
@@ -53,17 +110,17 @@ Example connection strings:
 
 .. code-block:: bash
 
-   # Using TIMEDB_DSN
-   export TIMEDB_DSN="postgresql://user:password@localhost:5432/timedb"
+   # Using TIMEDB_DSN (for local Docker setup)
+   export TIMEDB_DSN="postgresql://postgres:devpassword@localhost:5433/devdb"
 
    # Or using DATABASE_URL
-   export DATABASE_URL="postgresql://user:password@localhost:5432/timedb"
+   export DATABASE_URL="postgresql://postgres:devpassword@localhost:5433/devdb"
 
 You can also use a ``.env`` file in your project root:
 
 .. code-block:: text
 
-   TIMEDB_DSN=postgresql://user:password@localhost:5432/timedb
+   TIMEDB_DSN=postgresql://postgres:devpassword@localhost:5433/devdb
 
 The ``python-dotenv`` package (included in dependencies) will automatically load this file.
 
@@ -88,7 +145,8 @@ Or using Python:
 
 .. code-block:: python
 
-   import timedb as td
+   from timedb import TimeDataClient
+   td = TimeDataClient()
    td.create()
 
 Next Steps

@@ -1,17 +1,35 @@
-# timedb/cli.py
-"""TimeDB CLI - Command line interface for timedb operations."""
+"""
+TimeDB CLI - Command line interface for timedb operations.
+
+Provides administrative and operational commands for managing timedb:
+- create: Create database schema and series
+- delete: Delete database schema
+- api: Run the REST API server
+
+Environment:
+    - TIMEDB_DSN or DATABASE_URL: Database connection string
+    - Typical usage: timedb --help
+
+Examples:
+    # Start the API server
+    $ timedb api
+
+    # Create database schema
+    $ timedb create schema --dsn postgresql://...
+
+    # Create a series
+    $ timedb create series --dsn postgresql://... --name wind_power --unit MW
+
+    # Delete schema
+    $ timedb delete schema --dsn postgresql://...
+"""
 import os
-import uuid
 from typing import Optional
 from typing_extensions import Annotated
 
 import typer
 from rich.console import Console
-from rich.table import Table
 from rich.panel import Panel
-from dotenv import load_dotenv
-
-load_dotenv()
 
 # Initialize Typer apps
 app = typer.Typer(
@@ -20,11 +38,9 @@ app = typer.Typer(
 )
 create_app = typer.Typer(help="Create resources (tables, schema)")
 delete_app = typer.Typer(help="Delete resources (tables, schema)")
-users_app = typer.Typer(help="Manage users and API keys")
 
 app.add_typer(create_app, name="create")
 app.add_typer(delete_app, name="delete")
-app.add_typer(users_app, name="users")
 
 # Rich console for formatted output
 console = Console()
@@ -45,14 +61,19 @@ def get_dsn(dsn: Optional[str]) -> str:
 
 @app.command()
 def api(
-    host: Annotated[str, typer.Option("--host", help="Host to bind to")] = "127.0.0.1",
-    port: Annotated[int, typer.Option("--port", help="Port to bind to")] = 8000,
-    reload: Annotated[bool, typer.Option("--reload", help="Enable auto-reload for development")] = False,
+    host: Annotated[str, typer.Option("--host", help="Host to bind API server to")] = "127.0.0.1",
+    port: Annotated[int, typer.Option("--port", help="Port to bind API server to")] = 8000,
+    reload: Annotated[bool, typer.Option("--reload", help="Enable auto-reload for development (watch file changes)")] = False,
 ):
     """
     Start the FastAPI server.
 
-    Example: timedb api --host 127.0.0.1 --port 8000
+    The API server provides REST endpoints for reading and writing time series data.
+
+    Examples:
+        timedb api
+        timedb api --host 0.0.0.0 --port 9000
+        timedb api --reload
     """
     try:
         import uvicorn
@@ -84,17 +105,32 @@ def api(
 
 @create_app.command("tables")
 def create_tables(
-    dsn: Annotated[Optional[str], typer.Option("--dsn", "-d", envvar=["TIMEDB_DSN", "DATABASE_URL"], help="Postgres DSN")] = None,
-    schema: Annotated[Optional[str], typer.Option("--schema", "-s", help="Schema name (sets search_path)")] = None,
-    with_metadata: Annotated[bool, typer.Option("--with-metadata/--no-metadata", help="Create metadata_table addon")] = False,
-    with_users: Annotated[bool, typer.Option("--with-users/--no-users", help="Create users_table for authentication")] = False,
+    dsn: Annotated[Optional[str], typer.Option("--dsn", "-d", envvar=["TIMEDB_DSN", "DATABASE_URL"], help="Postgres connection string (or set TIMEDB_DSN/DATABASE_URL)")] = None,
+    schema: Annotated[Optional[str], typer.Option("--schema", "-s", help="Schema name (creates/sets search_path)")] = None,
+    retention: Annotated[Optional[str], typer.Option("--retention", "-r", help="Default retention period (overrides --retention-medium), e.g. '5 years'")] = None,
+    retention_short: Annotated[str, typer.Option("--retention-short", help="Retention for overlapping_short table")] = "6 months",
+    retention_medium: Annotated[str, typer.Option("--retention-medium", help="Retention for overlapping_medium table")] = "3 years",
+    retention_long: Annotated[str, typer.Option("--retention-long", help="Retention for overlapping_long table")] = "5 years",
     yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip confirmation prompt")] = False,
-    dry_run: Annotated[bool, typer.Option("--dry-run", help="Print DDL and exit")] = False,
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="Show DDL without creating tables")] = False,
 ):
     """
-    Create timedb tables.
+    Create timedb tables and schema in PostgreSQL.
 
-    Example: timedb create tables --dsn postgresql://... --with-users
+    This creates all necessary tables, views, and continuous aggregates:
+      • batches_table - Tracks data batch metadata
+      • series_table - Tracks time series definitions
+      • flat - Simple table for non-overlapping data
+      • overlapping_short/medium/long - For overlapping time ranges
+      • Views and continuous aggregates for efficient querying
+
+    Retention policies are applied to overlapping tables (auto-deletes old data).
+
+    Examples:
+        timedb create tables --dsn postgresql://user:pass@localhost/mydb
+        timedb create tables --schema my_schema --retention '2 years'
+        timedb create tables --dry-run
+        TIMEDB_DSN=postgresql://... timedb create tables
     """
     conninfo = get_dsn(dsn)
 
@@ -119,10 +155,6 @@ def create_tables(
         console.print(f"  Connection: [cyan]{conninfo[:50]}...[/cyan]" if len(conninfo) > 50 else f"  Connection: [cyan]{conninfo}[/cyan]")
         if schema:
             console.print(f"  Schema: [cyan]{schema}[/cyan]")
-        if with_metadata:
-            console.print("  [dim]+ metadata_table addon[/dim]")
-        if with_users:
-            console.print("  [dim]+ users_table for authentication[/dim]")
 
         if not typer.confirm("\nContinue?"):
             console.print("[yellow]Aborted.[/yellow]")
@@ -133,29 +165,22 @@ def create_tables(
     if schema:
         os.environ["PGOPTIONS"] = f"-c search_path={schema}"
 
+    # Apply shorthand: --retention overrides --retention-medium
+    if retention is not None:
+        retention_medium = retention
+
     try:
         # Create base schema
         create_schema = getattr(db.create, "create_schema", None)
         if create_schema is None:
             raise RuntimeError("db.create.create_schema not found")
-        create_schema(conninfo)
+        create_schema(
+            conninfo,
+            retention_short=retention_short,
+            retention_medium=retention_medium,
+            retention_long=retention_long,
+        )
         console.print("[green]✓[/green] Base timedb tables created")
-
-        # Create metadata schema if requested
-        if with_metadata:
-            create_schema_metadata = getattr(db.create_with_metadata, "create_schema_metadata", None)
-            if create_schema_metadata is None:
-                raise RuntimeError("db.create_with_metadata.create_schema_metadata not found")
-            create_schema_metadata(conninfo)
-            console.print("[green]✓[/green] Metadata table created")
-
-        # Create users schema if requested
-        if with_users:
-            create_schema_users = getattr(db.create_with_users, "create_schema_users", None)
-            if create_schema_users is None:
-                raise RuntimeError("db.create_with_users.create_schema_users not found")
-            create_schema_users(conninfo)
-            console.print("[green]✓[/green] Users table created")
 
         console.print("\n[bold green]Schema created successfully![/bold green]")
 
@@ -177,16 +202,26 @@ def create_tables(
 
 @delete_app.command("tables")
 def delete_tables(
-    dsn: Annotated[Optional[str], typer.Option("--dsn", "-d", envvar=["TIMEDB_DSN", "DATABASE_URL"], help="Postgres DSN")] = None,
+    dsn: Annotated[Optional[str], typer.Option("--dsn", "-d", envvar=["TIMEDB_DSN", "DATABASE_URL"], help="Postgres connection string (or set TIMEDB_DSN/DATABASE_URL)")] = None,
     schema: Annotated[Optional[str], typer.Option("--schema", "-s", help="Schema name (sets search_path)")] = None,
-    yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip confirmation prompt")] = False,
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip confirmation prompt (use with caution!)")] = False,
 ):
     """
-    Delete all timedb tables.
+    Delete all timedb tables from the database.
 
-    [bold red]WARNING:[/bold red] This will delete all data!
+    [bold red]⚠️  WARNING: This is DESTRUCTIVE[/bold red]
 
-    Example: timedb delete tables --dsn postgresql://...
+    This will permanently delete:
+      • All data tables (batches_table, series_table, flat, overlapping_*)
+      • All views and continuous aggregates
+      • All schema data
+
+    This cannot be undone!
+
+    Examples:
+        timedb delete tables --dsn postgresql://user:pass@localhost/mydb
+        timedb delete tables --schema my_schema --yes
+        TIMEDB_DSN=postgresql://... timedb delete tables
     """
     conninfo = get_dsn(dsn)
 
@@ -195,11 +230,11 @@ def delete_tables(
         console.print(Panel(
             "[bold red]WARNING: This will delete ALL timedb tables and data![/bold red]\n\n"
             "This includes:\n"
-            "  • runs_table\n"
-            "  • values_table\n"
-            "  • metadata_table\n"
-            "  • users_table\n"
-            "  • All views",
+            "  • batches_table\n"
+            "  • series_table\n"
+            "  • flat\n"
+            "  • overlapping_short / overlapping_medium / overlapping_long\n"
+            "  • All views and continuous aggregates",
             title="Destructive Operation",
             border_style="red",
         ))
@@ -238,249 +273,6 @@ def delete_tables(
                 os.environ.pop("PGOPTIONS", None)
             else:
                 os.environ["PGOPTIONS"] = old_pgoptions
-
-
-# =============================================================================
-# Users Commands
-# =============================================================================
-
-@users_app.command("create")
-def create_user(
-    dsn: Annotated[Optional[str], typer.Option("--dsn", "-d", envvar=["TIMEDB_DSN", "DATABASE_URL"], help="Postgres DSN")] = None,
-    tenant_id: Annotated[str, typer.Option("--tenant-id", "-t", help="Tenant UUID")] = ...,
-    email: Annotated[str, typer.Option("--email", "-e", help="User email address")] = ...,
-):
-    """
-    Create a new user with an API key.
-
-    Example: timedb users create --tenant-id <uuid> --email user@example.com
-    """
-    import psycopg
-
-    conninfo = get_dsn(dsn)
-
-    try:
-        tenant_uuid = uuid.UUID(tenant_id)
-    except ValueError:
-        console.print(f"[red]ERROR:[/red] Invalid tenant-id UUID: {tenant_id}")
-        raise typer.Exit(1)
-
-    try:
-        from . import db
-    except Exception as e:
-        console.print(f"[red]ERROR:[/red] Cannot import db module: {e}")
-        raise typer.Exit(1)
-
-    try:
-        with psycopg.connect(conninfo) as conn:
-            user = db.users.create_user(conn, tenant_id=tenant_uuid, email=email)
-
-            console.print(Panel(
-                f"[bold green]User created successfully![/bold green]\n\n"
-                f"  User ID:   [cyan]{user['user_id']}[/cyan]\n"
-                f"  Tenant ID: [cyan]{user['tenant_id']}[/cyan]\n"
-                f"  Email:     [cyan]{user['email']}[/cyan]\n\n"
-                f"  [bold yellow]API Key:[/bold yellow] [bold]{user['api_key']}[/bold]",
-                title="New User",
-                border_style="green",
-            ))
-            console.print("\n[yellow]⚠ Save the API key - it will not be shown again.[/yellow]")
-
-    except psycopg.errors.UniqueViolation as e:
-        if "api_key" in str(e):
-            console.print("[red]ERROR:[/red] API key collision (extremely rare). Please try again.")
-        else:
-            console.print(f"[red]ERROR:[/red] User with email '{email}' already exists for this tenant.")
-        raise typer.Exit(1)
-    except Exception as e:
-        console.print(f"[red]ERROR:[/red] {e}")
-        raise typer.Exit(1)
-
-
-@users_app.command("list")
-def list_users(
-    dsn: Annotated[Optional[str], typer.Option("--dsn", "-d", envvar=["TIMEDB_DSN", "DATABASE_URL"], help="Postgres DSN")] = None,
-    tenant_id: Annotated[Optional[str], typer.Option("--tenant-id", "-t", help="Filter by tenant UUID")] = None,
-    include_inactive: Annotated[bool, typer.Option("--include-inactive", help="Include inactive users")] = False,
-):
-    """
-    List all users.
-
-    Example: timedb users list --tenant-id <uuid>
-    """
-    import psycopg
-
-    conninfo = get_dsn(dsn)
-
-    tenant_uuid = None
-    if tenant_id:
-        try:
-            tenant_uuid = uuid.UUID(tenant_id)
-        except ValueError:
-            console.print(f"[red]ERROR:[/red] Invalid tenant-id UUID: {tenant_id}")
-            raise typer.Exit(1)
-
-    try:
-        from . import db
-    except Exception as e:
-        console.print(f"[red]ERROR:[/red] Cannot import db module: {e}")
-        raise typer.Exit(1)
-
-    try:
-        with psycopg.connect(conninfo) as conn:
-            users_list = db.users.list_users(conn, tenant_id=tenant_uuid, include_inactive=include_inactive)
-
-            if not users_list:
-                console.print("[yellow]No users found.[/yellow]")
-                return
-
-            # Create Rich table
-            table = Table(title=f"Users ({len(users_list)})")
-            table.add_column("Email", style="cyan")
-            table.add_column("User ID", style="dim")
-            table.add_column("Tenant ID", style="dim")
-            table.add_column("Status")
-            table.add_column("Created", style="dim")
-
-            for user in users_list:
-                status = "[green]active[/green]" if user['is_active'] else "[red]inactive[/red]"
-                created = user['created_at'].strftime("%Y-%m-%d %H:%M") if hasattr(user['created_at'], 'strftime') else str(user['created_at'])
-                table.add_row(
-                    user['email'],
-                    str(user['user_id'])[:8] + "...",
-                    str(user['tenant_id'])[:8] + "...",
-                    status,
-                    created,
-                )
-
-            console.print(table)
-
-    except Exception as e:
-        console.print(f"[red]ERROR:[/red] {e}")
-        raise typer.Exit(1)
-
-
-@users_app.command("regenerate-key")
-def regenerate_key(
-    dsn: Annotated[Optional[str], typer.Option("--dsn", "-d", envvar=["TIMEDB_DSN", "DATABASE_URL"], help="Postgres DSN")] = None,
-    email: Annotated[str, typer.Option("--email", "-e", help="User email address")] = ...,
-    yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip confirmation prompt")] = False,
-):
-    """
-    Regenerate API key for a user.
-
-    Example: timedb users regenerate-key --email user@example.com
-    """
-    import psycopg
-
-    conninfo = get_dsn(dsn)
-
-    if not yes:
-        console.print(f"[bold]Regenerate API key for:[/bold] [cyan]{email}[/cyan]")
-        console.print("[yellow]The old API key will be invalidated immediately.[/yellow]")
-        if not typer.confirm("\nContinue?"):
-            console.print("[yellow]Aborted.[/yellow]")
-            return
-
-    try:
-        from . import db
-    except Exception as e:
-        console.print(f"[red]ERROR:[/red] Cannot import db module: {e}")
-        raise typer.Exit(1)
-
-    try:
-        with psycopg.connect(conninfo) as conn:
-            new_key = db.users.regenerate_api_key(conn, email=email)
-            if new_key is None:
-                console.print(f"[red]ERROR:[/red] User with email '{email}' not found.")
-                raise typer.Exit(1)
-
-            console.print(Panel(
-                f"[bold green]API key regenerated![/bold green]\n\n"
-                f"  Email:   [cyan]{email}[/cyan]\n\n"
-                f"  [bold yellow]New API Key:[/bold yellow] [bold]{new_key}[/bold]",
-                title="Key Regenerated",
-                border_style="green",
-            ))
-            console.print("\n[yellow]⚠ Save the API key - it will not be shown again.[/yellow]")
-
-    except Exception as e:
-        console.print(f"[red]ERROR:[/red] {e}")
-        raise typer.Exit(1)
-
-
-@users_app.command("deactivate")
-def deactivate_user(
-    dsn: Annotated[Optional[str], typer.Option("--dsn", "-d", envvar=["TIMEDB_DSN", "DATABASE_URL"], help="Postgres DSN")] = None,
-    email: Annotated[str, typer.Option("--email", "-e", help="User email address")] = ...,
-    yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip confirmation prompt")] = False,
-):
-    """
-    Deactivate a user (revoke API access).
-
-    Example: timedb users deactivate --email user@example.com
-    """
-    import psycopg
-
-    conninfo = get_dsn(dsn)
-
-    if not yes:
-        console.print(f"[bold]Deactivate user:[/bold] [cyan]{email}[/cyan]")
-        console.print("[yellow]The user will no longer be able to authenticate.[/yellow]")
-        if not typer.confirm("\nContinue?"):
-            console.print("[yellow]Aborted.[/yellow]")
-            return
-
-    try:
-        from . import db
-    except Exception as e:
-        console.print(f"[red]ERROR:[/red] Cannot import db module: {e}")
-        raise typer.Exit(1)
-
-    try:
-        with psycopg.connect(conninfo) as conn:
-            success = db.users.deactivate_user(conn, email=email)
-            if not success:
-                console.print(f"[red]ERROR:[/red] User with email '{email}' not found.")
-                raise typer.Exit(1)
-            console.print(f"[green]✓[/green] User '{email}' deactivated")
-
-    except Exception as e:
-        console.print(f"[red]ERROR:[/red] {e}")
-        raise typer.Exit(1)
-
-
-@users_app.command("activate")
-def activate_user(
-    dsn: Annotated[Optional[str], typer.Option("--dsn", "-d", envvar=["TIMEDB_DSN", "DATABASE_URL"], help="Postgres DSN")] = None,
-    email: Annotated[str, typer.Option("--email", "-e", help="User email address")] = ...,
-):
-    """
-    Activate a user (restore API access).
-
-    Example: timedb users activate --email user@example.com
-    """
-    import psycopg
-
-    conninfo = get_dsn(dsn)
-
-    try:
-        from . import db
-    except Exception as e:
-        console.print(f"[red]ERROR:[/red] Cannot import db module: {e}")
-        raise typer.Exit(1)
-
-    try:
-        with psycopg.connect(conninfo) as conn:
-            success = db.users.activate_user(conn, email=email)
-            if not success:
-                console.print(f"[red]ERROR:[/red] User with email '{email}' not found.")
-                raise typer.Exit(1)
-            console.print(f"[green]✓[/green] User '{email}' activated")
-
-    except Exception as e:
-        console.print(f"[red]ERROR:[/red] {e}")
-        raise typer.Exit(1)
 
 
 if __name__ == "__main__":

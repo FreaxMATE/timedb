@@ -1,210 +1,285 @@
-import uuid
 import json
-from typing import Optional, Sequence, Iterable, Tuple, Dict
+from contextlib import contextmanager
+from typing import Optional, Iterable, Tuple, Dict, List, Union, Any
 from datetime import datetime
 import psycopg
+from psycopg import sql
+
+from .series import SeriesRegistry, OVERLAPPING_TABLES
 
 
-def insert_run(
-    conn: psycopg.Connection,
+@contextmanager
+def _ensure_conn(conninfo_or_conn):
+    """Yield a psycopg Connection, creating one only if given a string."""
+    if isinstance(conninfo_or_conn, str):
+        with psycopg.connect(conninfo_or_conn) as conn:
+            yield conn
+    else:
+        yield conninfo_or_conn
+
+_COPY_THRESHOLD = 50
+
+
+# ── Public API ───────────────────────────────────────────────────────────────
+
+def insert_values(
+    conninfo: Union[psycopg.Connection, str],
     *,
-    run_id: uuid.UUID,
-    tenant_id: uuid.UUID,
-    workflow_id: str,
-    run_start_time: datetime,
-    run_finish_time: Optional[datetime] = None,
+    workflow_id: Optional[str] = None,
+    batch_start_time: Optional[datetime] = None,
+    batch_finish_time: Optional[datetime] = None,
+    value_rows: Iterable[Tuple],
     known_time: Optional[datetime] = None,
-    run_params: Optional[Dict] = None,
-) -> None:
+    batch_params: Optional[Dict] = None,
+    series_id: int,
+    routing: Dict[str, Any],
+) -> Optional[int]:
     """
-    Insert one forecast run into runs_table.
-
-    Uses ON CONFLICT so retries are safe.
+    Insert values into the correct table based on series overlapping flag.
+    
+    Single-series inserts only (all rows have the same series_id).
+    Routes to flat table (upsert) or overlapping table (versioned with batch).
+    
+    value_rows is expected to be an iterable where each item is either:
+      - (valid_time, series_id, value)                      # point-in-time
+      - (valid_time, valid_time_end, series_id, value)      # interval
     
     Args:
-        known_time: Time of knowledge - when the data was known/available.
-                   If not provided, defaults to inserted_at (now()) in the database.
-                   Useful for backfill operations where data is inserted later.
+        conninfo: Database connection or connection string
+        workflow_id: Workflow identifier
+        batch_start_time: Batch start time
+        batch_finish_time: Batch finish time
+        value_rows: Iterable of value tuples
+        known_time: Time of knowledge
+        batch_params: Batch parameters
+        series_id: Series identifier
+        routing: Routing info dict with keys: overlapping (bool), retention (str), table (str)
+    
+    Returns:
+        The batch_id if overlapping, None for flat.
     """
+    rows_list = list(value_rows)
+    if not rows_list:
+        return None
+    
+    with _ensure_conn(conninfo) as conn:
+        with conn.transaction():
+            is_overlapping = routing["overlapping"]
+            
+            # Route to appropriate insert function
+            if not is_overlapping:
+                _insert_flat(conn, value_rows=rows_list, known_time=known_time)
+                return None
+            else:
+                batch_id, batch_known_time = _create_batch(
+                    conn,
+                    workflow_id=workflow_id,
+                    batch_start_time=batch_start_time,
+                    batch_finish_time=batch_finish_time,
+                    known_time=known_time,
+                    batch_params=batch_params,
+                )
+                _insert_overlapping(
+                    conn,
+                    batch_id=batch_id,
+                    known_time=batch_known_time,
+                    value_rows=rows_list,
+                    series_id=series_id,
+                    routing=routing,
+                )
+                return batch_id
 
-    run_params = json.dumps(run_params) if run_params is not None else None
 
-    if run_start_time.tzinfo is None:
-        raise ValueError("run_start_time must be timezone-aware")
-    if run_finish_time is not None and run_finish_time.tzinfo is None:
-        raise ValueError("run_finish_time must be timezone-aware")
+# ── Private helpers ──────────────────────────────────────────────────────────
+
+def _create_batch(
+    conn: psycopg.Connection,
+    *,
+    workflow_id: Optional[str] = None,
+    batch_start_time: Optional[datetime] = None,
+    batch_finish_time: Optional[datetime] = None,
+    known_time: Optional[datetime] = None,
+    batch_params: Optional[Dict] = None,
+) -> Tuple[int, datetime]:
+    """
+    Insert one batch into batches_table.
+
+    Returns:
+        Tuple of (batch_id, known_time)
+    """
+    batch_params_json = json.dumps(batch_params) if batch_params is not None else None
+
+    # Validate timezone-aware datetimes
+    if batch_start_time is not None and batch_start_time.tzinfo is None:
+        raise ValueError("batch_start_time must be timezone-aware")
+    if batch_finish_time is not None and batch_finish_time.tzinfo is None:
+        raise ValueError("batch_finish_time must be timezone-aware")
     if known_time is not None and known_time.tzinfo is None:
         raise ValueError("known_time must be timezone-aware")
 
     with conn.cursor() as cur:
         if known_time is not None:
-            # If known_time is provided, include it in the INSERT
             cur.execute(
                 """
-                INSERT INTO runs_table (run_id, tenant_id, workflow_id, run_start_time, run_finish_time, known_time, run_params)
-                VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb)
-                ON CONFLICT (run_id) DO NOTHING;
+                INSERT INTO batches_table (
+                    workflow_id, batch_start_time, batch_finish_time,
+                    known_time, batch_params
+                )
+                VALUES (%s, %s, %s, %s, %s::jsonb)
+                RETURNING batch_id, known_time;
                 """,
-                (run_id, tenant_id, workflow_id, run_start_time, run_finish_time, known_time, run_params),
+                (workflow_id, batch_start_time, batch_finish_time, known_time, batch_params_json),
             )
         else:
-            # If known_time is not provided, let the database default to inserted_at (now())
             cur.execute(
                 """
-                INSERT INTO runs_table (run_id, tenant_id, workflow_id, run_start_time, run_finish_time, run_params)
-                VALUES (%s, %s, %s, %s, %s, %s::jsonb)
-                ON CONFLICT (run_id) DO NOTHING;
+                INSERT INTO batches_table (
+                    workflow_id, batch_start_time, batch_finish_time,
+                    batch_params
+                )
+                VALUES (%s, %s, %s, %s::jsonb)
+                RETURNING batch_id, known_time;
                 """,
-                (run_id, tenant_id, workflow_id, run_start_time, run_finish_time, run_params),
+                (workflow_id, batch_start_time, batch_finish_time, batch_params_json),
             )
+        result = cur.fetchone()
+        return result[0], result[1]
 
 
-def insert_values(
+
+def _insert_flat(
     conn: psycopg.Connection,
     *,
-    run_id: uuid.UUID,
-    value_rows: Iterable[Tuple],
-    changed_by: Optional[str] = None,
+    value_rows: List[Tuple],
+    known_time: Optional[datetime] = None,
 ) -> None:
     """
-    Bulk insert forecast values for a run.
+    Insert flat (fact) values into the flat table.
 
-    Accepts rows in either of two shapes:
-      - (tenant_id, valid_time, series_id, value)                       # point-in-time
-      - (tenant_id, valid_time, valid_time_end, series_id, value)       # interval
+    Each row is: (valid_time, series_id, value)
+    or with valid_time_end: (valid_time, valid_time_end, series_id, value)
 
-    The function will prepend the provided run_id to each row
-    and insert tuples of shape (run_id, tenant_id, series_id, valid_time, valid_time_end, value).
+    Uses ON CONFLICT to upsert (update value on duplicate).
+    For large batches (>=50 rows), uses COPY into a staging table for performance.
     
-    Note: tenant_id is included in each row to support both multi-tenant scenarios
-    (where different rows may have different tenant_ids) and single-tenant scenarios
-    (where all rows use the same default tenant_id).
-    
-    Note: Values must already be in the canonical unit for the series (unit conversion
-    should happen before calling this function).
+    Note: Validation is already done in SDK layer (_dataframe_to_value_rows).
     """
-
-    rows_list = []
-    for item in value_rows:
-        # either 4-tuple (point-in-time) or 5-tuple (interval)
-        if len(item) == 4:
-            tenant_id, valid_time, series_id, value = item
-            valid_time_end = None
-        elif len(item) == 5:
-            tenant_id, valid_time, valid_time_end, series_id, value = item
-        else:
-            raise ValueError(
-                "Each value row must be either "
-                "(tenant_id, valid_time, series_id, value) or "
-                "(tenant_id, valid_time, valid_time_end, series_id, value)"
-            )
-
-        # Basic checks
-        if not isinstance(tenant_id, uuid.UUID):
-            raise ValueError("tenant_id must be a UUID")
-        if not isinstance(series_id, uuid.UUID):
-            raise ValueError("series_id must be a UUID")
-        if not isinstance(valid_time, datetime):
-            raise ValueError("valid_time must be a datetime")
-        if valid_time.tzinfo is None:
-            raise ValueError("valid_time must be timezone-aware (timestamptz).")
-
-        if valid_time_end is not None:
-            if not isinstance(valid_time_end, datetime):
-                raise ValueError("valid_time_end must be a datetime or None")
-            if valid_time_end.tzinfo is None:
-                raise ValueError("valid_time_end must be timezone-aware (timestamptz).")
-            if not (valid_time_end > valid_time):
-                raise ValueError("valid_time_end must be strictly after valid_time")
-
-        rows_list.append((run_id, tenant_id, valid_time, valid_time_end, series_id, value))
-
-    if not rows_list:
+    if not value_rows:
         return
-
-    with conn.cursor() as cur:
-        # Insert with conflict check matching the unique index
-        # The unique index is on (run_id, tenant_id, valid_time, COALESCE(valid_time_end, valid_time), series_id) WHERE is_current
-        # We use WHERE NOT EXISTS to prevent duplicates, matching the index logic 
-        # It mirrors the index's uniqueness rule to avoid constraint violations.
-        cur.executemany(
-            """
-            INSERT INTO values_table (
-                run_id, tenant_id, series_id, valid_time, valid_time_end, value,
-                changed_by, change_time, is_current
-            )
-            SELECT %s, %s, %s, %s, %s, %s, %s, now(), true
-            WHERE NOT EXISTS (
-                SELECT 1 FROM values_table
-                WHERE run_id = %s
-                  AND tenant_id = %s
-                  AND valid_time = %s
-                  AND COALESCE(valid_time_end, valid_time) = COALESCE(%s, %s)
-                  AND series_id = %s
-                  AND is_current = true
-            );
-            """,
-            [(r[0], r[1], r[4], r[2], r[3], r[5], changed_by, r[0], r[1], r[2], r[3], r[2], r[4]) for r in rows_list],
+    
+    # Normalize to (series_id, valid_time, valid_time_end, value, known_time) format
+    first_row = value_rows[0]
+    
+    if len(first_row) == 3:
+        # Point-in-time: (valid_time, series_id, value)
+        rows_with_kt = [(row[1], row[0], None, row[2], known_time) for row in value_rows]
+    elif len(first_row) == 4:
+        # Interval: (valid_time, valid_time_end, series_id, value)
+        rows_with_kt = [(row[2], row[0], row[1], row[3], known_time) for row in value_rows]
+    else:
+        raise ValueError(
+            "Flat rows must be (valid_time, series_id, value) "
+            "or (valid_time, valid_time_end, series_id, value)"
         )
 
-
-def insert_run_with_values(
-    conninfo: str,
-    *,
-    run_id: uuid.UUID,
-    tenant_id: uuid.UUID,
-    workflow_id: str,
-    run_start_time: datetime,
-    run_finish_time: Optional[datetime],
-    value_rows: Iterable[Tuple],  # accepts (tenant_id, valid_time, series_id, value) or (tenant_id, valid_time, valid_time_end, series_id, value)
-    known_time: Optional[datetime] = None,
-    run_params: Optional[Dict] = None,
-    changed_by: Optional[str] = None,
-) -> None:
-    """
-    One-shot helper: inserts the run + all values atomically.
-
-    This function ensures atomicity: either all operations succeed and are committed,
-    or all operations are rolled back if any error occurs. No partial writes are possible.
-
-    value_rows is expected to be an iterable where each item is either:
-      - (tenant_id, valid_time, series_id, value),                      # point-in-time
-      - (tenant_id, valid_time, valid_time_end, series_id, value),      # interval
-
-    Note: The run's tenant_id parameter is used for the runs_table entry, but each value row
-    can specify its own tenant_id. For single-tenant installations, all rows will typically
-    use the same default tenant_id value.
-    
-    Note: Values must already be in the canonical unit for the series (unit conversion
-    should happen before calling this function).
-    
-    Args:
-        tenant_id: Tenant ID for the run entry in runs_table (may differ from tenant_ids in value_rows)
-        known_time: Time of knowledge - when the data was known/available.
-                   If not provided, defaults to inserted_at (now()) in the database.
-                   Useful for backfill operations where data is inserted later.
-    
-    Raises:
-        Exception: Any exception raised during insertion will cause a complete rollback
-                  of the transaction, ensuring no partial writes.
-    """
-
-    with psycopg.connect(conninfo) as conn:
-        # Use transaction context manager to ensure atomicity
-        # If any exception occurs, the transaction will automatically rollback
-        # This ensures either all operations succeed or none do (no partial writes)
-        with conn.transaction():
-            insert_run(
-                conn,
-                run_id=run_id,
-                tenant_id=tenant_id,
-                workflow_id=workflow_id,
-                run_start_time=run_start_time,
-                run_finish_time=run_finish_time,
-                known_time=known_time,
-                run_params=run_params,
+    with conn.cursor() as cur:
+        if len(rows_with_kt) >= _COPY_THRESHOLD:
+            # COPY path: staging table → INSERT...ON CONFLICT
+            cur.execute("""
+                CREATE TEMP TABLE _flat_staging (
+                    series_id bigint,
+                    valid_time timestamptz,
+                    valid_time_end timestamptz,
+                    value double precision,
+                    known_time timestamptz
+                ) ON COMMIT DROP
+            """)
+            with cur.copy("COPY _flat_staging (series_id, valid_time, valid_time_end, value, known_time) FROM STDIN") as copy:
+                for row in rows_with_kt:
+                    copy.write_row(row)
+            cur.execute("""
+                INSERT INTO flat (series_id, valid_time, valid_time_end, value, known_time)
+                SELECT series_id, valid_time, valid_time_end, value, COALESCE(known_time, now()) FROM _flat_staging
+                ON CONFLICT (series_id, valid_time)
+                DO UPDATE SET value = EXCLUDED.value, valid_time_end = EXCLUDED.valid_time_end, known_time = EXCLUDED.known_time
+            """)
+        else:
+            cur.executemany(
+                """
+                INSERT INTO flat (series_id, valid_time, valid_time_end, value, known_time)
+                VALUES (%s, %s, %s, %s, COALESCE(%s, now()))
+                ON CONFLICT (series_id, valid_time)
+                DO UPDATE SET value = EXCLUDED.value, valid_time_end = EXCLUDED.valid_time_end, known_time = EXCLUDED.known_time
+                """,
+                rows_with_kt,
             )
 
-            insert_values(conn, run_id=run_id, value_rows=value_rows, changed_by=changed_by)
+
+def _insert_overlapping(
+    conn: psycopg.Connection,
+    *,
+    batch_id: int,
+    known_time: datetime,
+    value_rows: List[Tuple],
+    series_id: int,
+    routing: Dict[str, Any],
+) -> None:
+    """
+    Insert overlapping values for a single series.
     
-    print("Data values inserted successfully.")
+    Single-series inserts: all rows have same format, series_id, and retention tier.
+    Routes to overlapping_short/medium/long based on retention from routing.
+
+    Each row: (valid_time, series_id, value) or (valid_time, valid_time_end, series_id, value)
+
+    For large batches (>=50 rows), uses COPY protocol for performance.
+    
+    Note: SDK validates all data (timezone, intervals, types) in _dataframe_to_value_rows.
+    """
+    if not value_rows:
+        return
+    
+    # Detect format from first row (all rows have same format in single-series inserts)
+    first_row = value_rows[0]
+    
+    if len(first_row) == 3:
+        # Point-in-time: (valid_time, series_id, value)
+        rows_prepared = [
+            (batch_id, series_id, row[0], None, row[2], known_time)
+            for row in value_rows
+        ]
+    elif len(first_row) == 4:
+        # Interval: (valid_time, valid_time_end, series_id, value)
+        rows_prepared = [
+            (batch_id, series_id, row[0], row[1], row[3], known_time)
+            for row in value_rows
+        ]
+    else:
+        raise ValueError(
+            "Overlapping rows must be (valid_time, series_id, value) "
+            "or (valid_time, valid_time_end, series_id, value)"
+        )
+    
+    # Route to retention tier
+    retention = routing["retention"]
+    table = OVERLAPPING_TABLES[retention]
+    
+    with conn.cursor() as cur:
+        if len(rows_prepared) >= _COPY_THRESHOLD:
+            # COPY path for large batches
+            copy_sql = sql.SQL(
+                "COPY {} (batch_id, series_id, valid_time, valid_time_end, value, known_time) FROM STDIN"
+            ).format(sql.Identifier(table))
+            with cur.copy(copy_sql) as copy:
+                for row in rows_prepared:
+                    copy.write_row(row)
+        else:
+            cur.executemany(
+                sql.SQL("""
+                INSERT INTO {} (batch_id, series_id, valid_time, valid_time_end, value, known_time)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                """).format(sql.Identifier(table)),
+                rows_prepared,
+            )
+
+

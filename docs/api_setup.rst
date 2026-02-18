@@ -48,17 +48,7 @@ Examples:
 Using Python SDK
 ~~~~~~~~~~~~~~~~
 
-Start the server programmatically:
-
-.. code-block:: python
-
-   import timedb as td
-
-   # Blocking (runs until Ctrl+C)
-   td.start_api()
-
-   # Non-blocking (runs in background thread)
-   td.start_api_background()
+Start the server programmatically via the CLI is the recommended approach. See the :doc:`CLI <cli>` documentation for details.
 
 Using uvicorn directly
 ~~~~~~~~~~~~~~~~~~~~~~
@@ -106,54 +96,63 @@ API Endpoints Overview
 The API provides the following endpoints:
 
 - ``GET /`` - API information and available endpoints
+- ``POST /values`` - Insert time series data
 - ``GET /values`` - Read time series values
-- ``POST /runs`` - Create a new run with values
-- ``PUT /values`` - Update existing records
-- ``POST /schema/create`` - Create database schema
-- ``DELETE /schema/delete`` - Delete database schema
+- ``PUT /values`` - Update existing time series records
+- ``POST /series`` - Create a new time series
+- ``GET /series`` - List/filter time series
+- ``GET /series/labels`` - List unique label values for a key
+- ``GET /series/count`` - Count matching time series
 
 Visit ``/docs`` when the server is running for detailed endpoint documentation with request/response schemas.
 
-Authentication
---------------
+Updating Records via API
+------------------------
 
-TimeDB supports optional multi-tenant authentication using API keys.
+Update overlapping records using the ``PUT /values`` endpoint:
 
-Setting Up Authentication
-~~~~~~~~~~~~~~~~~~~~~~~~~
+.. code-block:: bash
 
-1. Create the schema with users table:
+   curl -X PUT http://localhost:8000/values \
+     -H "Content-Type: application/json" \
+     -d '{
+       "updates": [
+         {
+           "valid_time": "2025-01-01T12:00:00Z",
+           "series_id": 1,
+           "batch_id": 42,
+           "value": 150.0,
+           "annotation": "Corrected reading",
+           "tags": ["reviewed"],
+           "changed_by": "user@example.com"
+         }
+       ]
+     }'
 
-   .. code-block:: bash
+Or using Python requests:
 
-      timedb create tables --with-users
+.. code-block:: python
 
-2. Create users with API keys:
+   import requests
 
-   .. code-block:: bash
-
-      timedb users create --tenant-id <uuid> --email user@example.com
-
-3. Use API keys in requests:
-
-   .. code-block:: python
-
-      import requests
-
-      api_key = "your-api-key-here"
-      headers = {"X-API-Key": api_key}
-
-      response = requests.get(
-          "http://127.0.0.1:8000/values",
-          headers=headers
-      )
-
-Tenant Isolation
-~~~~~~~~~~~~~~~~
-
-Each user's API key is tied to a ``tenant_id``. Users can only access data for their own tenant, providing complete data isolation between tenants.
-
-For more details on user management, see the :doc:`CLI documentation <cli>`.
+   response = requests.put(
+       "http://localhost:8000/values",
+       json={
+           "updates": [
+               {
+                   "valid_time": valid_time.isoformat(),
+                   "series_id": series_id,
+                   "batch_id": batch_id,
+                   "value": 150.0,
+                   "annotation": "Corrected",
+                   "tags": ["reviewed"],
+                   "changed_by": "user@example.com"
+               }
+           ]
+       }
+   )
+   result = response.json()
+   print(f"Updated: {len(result['updated'])}")
 
 Production Deployment
 ---------------------
